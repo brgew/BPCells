@@ -12,6 +12,8 @@
 #include "matrixIterators/MatrixMultiply.h"
 #include "matrixIterators/MatrixOps.h"
 #include "matrixIterators/MatrixStats.h"
+#include "matrixIterators/RenameDims.h"
+#include "matrixIterators/SVD.h"
 #include "matrixIterators/TSparseMatrixWriter.h"
 #include "matrixIterators/WilcoxonRankSum.h"
 
@@ -22,16 +24,29 @@
 using namespace BPCells;
 using namespace Rcpp;
 
+// Add a protected handle to the underlying R data to prevent unwanted garbage collection
+template <typename T> class RMatrixWrapper : public BPCells::MatrixLoaderWrapper<T> {
+  private:
+    Rcpp::RObject preserved_object;
+
+  public:
+    RMatrixWrapper(SEXP preserved_object, std::unique_ptr<MatrixLoader<T>> &&loader)
+        : BPCells::MatrixLoaderWrapper<T>(std::move(loader))
+        , preserved_object(preserved_object) {}
+};
+
 // [[Rcpp::export]]
 SEXP iterate_csparse_matrix_cpp(
     SEXP matrix, const StringVector row_names, const StringVector col_names
 ) {
     auto eigen_mat = Rcpp::as<Eigen::Map<Eigen::SparseMatrix<double>>>(matrix);
-    return make_unique_xptr<CSparseMatrix>(
+    auto loader = std::make_unique<CSparseMatrix>(
         eigen_mat,
         std::make_unique<RcppStringReader>(row_names),
         std::make_unique<RcppStringReader>(col_names)
     );
+
+    return make_unique_xptr<RMatrixWrapper<double>>(Rcpp::RObject(matrix), std::move(loader));
 }
 
 template <typename From, typename To> SEXP convert_matrix_cpp(SEXP matrix) {
@@ -115,7 +130,58 @@ SEXP iterate_matrix_row_select_double_cpp(SEXP matrix, std::vector<uint32_t> row
 }
 
 // [[Rcpp::export]]
-SEXP iterate_matrix_row_bind_uint32_t_cpp(SEXP matrix_list) {
+SEXP iterate_matrix_rename_dims_uint32_t_cpp(
+    SEXP matrix,
+    std::vector<std::string> row_names,
+    std::vector<std::string> col_names,
+    bool clear_row_names,
+    bool clear_col_names
+) {
+    return make_unique_xptr<RenameDims<uint32_t>>(
+        take_unique_xptr<MatrixLoader<uint32_t>>(matrix),
+        row_names,
+        col_names,
+        clear_row_names,
+        clear_col_names
+    );
+}
+
+// [[Rcpp::export]]
+SEXP iterate_matrix_rename_dims_float_cpp(
+    SEXP matrix,
+    std::vector<std::string> row_names,
+    std::vector<std::string> col_names,
+    bool clear_row_names,
+    bool clear_col_names
+) {
+    return make_unique_xptr<RenameDims<float>>(
+        take_unique_xptr<MatrixLoader<float>>(matrix),
+        row_names,
+        col_names,
+        clear_row_names,
+        clear_col_names
+    );
+}
+
+// [[Rcpp::export]]
+SEXP iterate_matrix_rename_dims_double_cpp(
+    SEXP matrix,
+    std::vector<std::string> row_names,
+    std::vector<std::string> col_names,
+    bool clear_row_names,
+    bool clear_col_names
+) {
+    return make_unique_xptr<RenameDims<double>>(
+        take_unique_xptr<MatrixLoader<double>>(matrix),
+        row_names,
+        col_names,
+        clear_row_names,
+        clear_col_names
+    );
+}
+
+// [[Rcpp::export]]
+SEXP iterate_matrix_row_bind_uint32_t_cpp(SEXP matrix_list, int threads) {
     std::vector<std::unique_ptr<MatrixLoader<uint32_t>>> matrix_vec;
     List l = matrix_list;
     for (uint32_t i = 0; i < l.size(); i++) {
@@ -123,11 +189,11 @@ SEXP iterate_matrix_row_bind_uint32_t_cpp(SEXP matrix_list) {
         matrix_vec.push_back(take_unique_xptr<MatrixLoader<uint32_t>>(elem));
     }
 
-    return make_unique_xptr<ConcatRows<uint32_t>>(std::move(matrix_vec));
+    return make_unique_xptr<ConcatRows<uint32_t>>(std::move(matrix_vec), threads);
 }
 
 // [[Rcpp::export]]
-SEXP iterate_matrix_row_bind_float_cpp(SEXP matrix_list) {
+SEXP iterate_matrix_row_bind_float_cpp(SEXP matrix_list, int threads) {
     std::vector<std::unique_ptr<MatrixLoader<float>>> matrix_vec;
     List l = matrix_list;
     for (uint32_t i = 0; i < l.size(); i++) {
@@ -135,11 +201,11 @@ SEXP iterate_matrix_row_bind_float_cpp(SEXP matrix_list) {
         matrix_vec.push_back(take_unique_xptr<MatrixLoader<float>>(elem));
     }
 
-    return make_unique_xptr<ConcatRows<float>>(std::move(matrix_vec));
+    return make_unique_xptr<ConcatRows<float>>(std::move(matrix_vec), threads);
 }
 
 // [[Rcpp::export]]
-SEXP iterate_matrix_row_bind_double_cpp(SEXP matrix_list) {
+SEXP iterate_matrix_row_bind_double_cpp(SEXP matrix_list, int threads) {
     std::vector<std::unique_ptr<MatrixLoader<double>>> matrix_vec;
     List l = matrix_list;
     for (uint32_t i = 0; i < l.size(); i++) {
@@ -147,11 +213,11 @@ SEXP iterate_matrix_row_bind_double_cpp(SEXP matrix_list) {
         matrix_vec.push_back(take_unique_xptr<MatrixLoader<double>>(elem));
     }
 
-    return make_unique_xptr<ConcatRows<double>>(std::move(matrix_vec));
+    return make_unique_xptr<ConcatRows<double>>(std::move(matrix_vec), threads);
 }
 
 // [[Rcpp::export]]
-SEXP iterate_matrix_col_bind_uint32_t_cpp(SEXP matrix_list) {
+SEXP iterate_matrix_col_bind_uint32_t_cpp(SEXP matrix_list, int threads) {
     std::vector<std::unique_ptr<MatrixLoader<uint32_t>>> matrix_vec;
     List l = matrix_list;
     for (uint32_t i = 0; i < l.size(); i++) {
@@ -159,11 +225,11 @@ SEXP iterate_matrix_col_bind_uint32_t_cpp(SEXP matrix_list) {
         matrix_vec.push_back(take_unique_xptr<MatrixLoader<uint32_t>>(elem));
     }
 
-    return make_unique_xptr<ConcatCols<uint32_t>>(std::move(matrix_vec));
+    return make_unique_xptr<ConcatCols<uint32_t>>(std::move(matrix_vec), threads);
 }
 
 // [[Rcpp::export]]
-SEXP iterate_matrix_col_bind_float_cpp(SEXP matrix_list) {
+SEXP iterate_matrix_col_bind_float_cpp(SEXP matrix_list, int threads) {
     std::vector<std::unique_ptr<MatrixLoader<float>>> matrix_vec;
     List l = matrix_list;
     for (uint32_t i = 0; i < l.size(); i++) {
@@ -171,11 +237,11 @@ SEXP iterate_matrix_col_bind_float_cpp(SEXP matrix_list) {
         matrix_vec.push_back(take_unique_xptr<MatrixLoader<float>>(elem));
     }
 
-    return make_unique_xptr<ConcatCols<float>>(std::move(matrix_vec));
+    return make_unique_xptr<ConcatCols<float>>(std::move(matrix_vec), threads);
 }
 
 // [[Rcpp::export]]
-SEXP iterate_matrix_col_bind_double_cpp(SEXP matrix_list) {
+SEXP iterate_matrix_col_bind_double_cpp(SEXP matrix_list, int threads) {
     std::vector<std::unique_ptr<MatrixLoader<double>>> matrix_vec;
     List l = matrix_list;
     for (uint32_t i = 0; i < l.size(); i++) {
@@ -183,7 +249,7 @@ SEXP iterate_matrix_col_bind_double_cpp(SEXP matrix_list) {
         matrix_vec.push_back(take_unique_xptr<MatrixLoader<double>>(elem));
     }
 
-    return make_unique_xptr<ConcatCols<double>>(std::move(matrix_vec));
+    return make_unique_xptr<ConcatCols<double>>(std::move(matrix_vec), threads);
 }
 
 // [[Rcpp::export]]
@@ -344,17 +410,54 @@ List matrix_stats_cpp(SEXP matrix, int row_stats, int col_stats) {
 
 // [[Rcpp::export]]
 Eigen::MatrixXd wilcoxon_rank_sum_pval_uint32_t_cpp(SEXP matrix, std::vector<uint32_t> groups) {
-    return wilcoxon_rank_sum(take_unique_xptr<MatrixLoader<uint32_t>>(matrix), groups);
+    return run_with_R_interrupt_check(
+        &wilcoxon_rank_sum<uint32_t>, take_unique_xptr<MatrixLoader<uint32_t>>(matrix), std::cref(groups)
+    );
 }
 
 // [[Rcpp::export]]
 Eigen::MatrixXd wilcoxon_rank_sum_pval_float_cpp(SEXP matrix, std::vector<uint32_t> groups) {
-    return wilcoxon_rank_sum(take_unique_xptr<MatrixLoader<float>>(matrix), groups);
+    return run_with_R_interrupt_check(
+        &wilcoxon_rank_sum<float>, take_unique_xptr<MatrixLoader<float>>(matrix), std::cref(groups)
+    );
 }
 
 // [[Rcpp::export]]
 Eigen::MatrixXd wilcoxon_rank_sum_pval_double_cpp(SEXP matrix, std::vector<uint32_t> groups) {
-    return wilcoxon_rank_sum(take_unique_xptr<MatrixLoader<double>>(matrix), groups);
+    return run_with_R_interrupt_check(
+        &wilcoxon_rank_sum<double>, take_unique_xptr<MatrixLoader<double>>(matrix), std::cref(groups)
+    );
+}
+
+// [[Rcpp::export]]
+SEXP svds_cpp(SEXP matrix, int k, int n_cv, int maxit, double tol, bool transpose) { 
+    auto mat = take_unique_xptr<MatrixLoader<double>>(matrix);
+    SVDResult res = run_with_R_interrupt_check(
+        svd, mat.get(), k, n_cv, maxit, tol, transpose
+    );
+    if (!res.success) warning("SVD calculation did not converge");
+    return List::create(
+        Named("d") = res.d,
+        Named("u") = res.u,
+        Named("v") = res.v,
+        Named("niter") = res.num_iterations,
+        Named("nops") = res.num_operations,
+        Named("nconv") = res.num_converged
+    );
+}
+
+// Compute a histogram of the values in a matrix.
+// [[Rcpp::export]]
+NumericVector matrix_value_histogram_cpp(SEXP matrix, uint32_t max_value) {
+    MatrixIterator<uint32_t> it(take_unique_xptr<MatrixLoader<uint32_t>>(matrix));
+    std::vector<double> result(max_value + 1, 0.0);
+    while (it.nextCol()) {
+        while (it.nextValue()) {
+            if (it.val() == 0) continue;
+            result[std::min(it.val(), max_value + 1) - 1]++;
+        }
+    }
+    return Rcpp::wrap(result);
 }
 
 // [[Rcpp::export]]

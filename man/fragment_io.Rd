@@ -27,7 +27,8 @@ write_fragments_hdf5(
   compress = TRUE,
   buffer_size = 8192L,
   chunk_size = 1024L,
-  overwrite = FALSE
+  overwrite = FALSE,
+  gzip_level = 0L
 )
 
 open_fragments_hdf5(path, group = "fragments", buffer_size = 16384L)
@@ -52,6 +53,10 @@ pass a temp path as a string to customize the temp dir location.}
 to an existing hdf5 file this group must not already be in use}
 
 \item{chunk_size}{For performance tuning only. The chunk size used for the HDF5 array storage.}
+
+\item{gzip_level}{Gzip compression level. Default is 0 (no compression). This is recommended when both compression and
+compatibility with outside programs is required. Otherwise, using compress=TRUE is recommended
+as it is >10x faster with often similar compression levels.}
 }
 \value{
 Fragment object

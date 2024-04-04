@@ -117,12 +117,8 @@ SEXP write_matrix_transpose_dir(
         wb, tmpdir.c_str(), load_bytes, sort_buffer_bytes, row_major
     );
     auto mat = take_unique_xptr<MatrixLoader<T>>(matrix);
-    run_with_R_interrupt_check(
-        &MatrixWriter<T>::write,
-        &transpose,
-        std::ref(*mat)
-    );
-    
+    run_with_R_interrupt_check(&MatrixWriter<T>::write, &transpose, std::ref(*mat));
+
     FileReaderBuilder rb(outdir);
     return make_unique_xptr<StoredMatrix<T>>(StoredMatrix<T>::openPacked(rb));
 }
@@ -512,9 +508,10 @@ void write_unpacked_matrix_hdf5_uint32_t_cpp(
     uint32_t buffer_size,
     uint32_t chunk_size,
     bool allow_overwrite,
-    bool row_major
+    bool row_major,
+    uint32_t gzip_level
 ) {
-    H5WriterBuilder wb(file, group, buffer_size, chunk_size, allow_overwrite);
+    H5WriterBuilder wb(file, group, buffer_size, chunk_size, allow_overwrite, gzip_level);
     write_unpacked_matrix<uint32_t>(wb, matrix, row_major);
 }
 // [[Rcpp::export]]
@@ -525,9 +522,10 @@ void write_packed_matrix_hdf5_uint32_t_cpp(
     uint32_t buffer_size,
     uint32_t chunk_size,
     bool allow_overwrite,
-    bool row_major
+    bool row_major,
+    uint32_t gzip_level
 ) {
-    H5WriterBuilder wb(file, group, buffer_size, chunk_size, allow_overwrite);
+    H5WriterBuilder wb(file, group, buffer_size, chunk_size, allow_overwrite, gzip_level);
     write_packed_matrix<uint32_t>(wb, matrix, row_major);
 }
 // [[Rcpp::export]]
@@ -538,9 +536,10 @@ void write_unpacked_matrix_hdf5_float_cpp(
     uint32_t buffer_size,
     uint32_t chunk_size,
     bool allow_overwrite,
-    bool row_major
+    bool row_major,
+    uint32_t gzip_level
 ) {
-    H5WriterBuilder wb(file, group, buffer_size, chunk_size, allow_overwrite);
+    H5WriterBuilder wb(file, group, buffer_size, chunk_size, allow_overwrite, gzip_level);
     write_unpacked_matrix<float>(wb, matrix, row_major);
 }
 // [[Rcpp::export]]
@@ -551,9 +550,10 @@ void write_packed_matrix_hdf5_float_cpp(
     uint32_t buffer_size,
     uint32_t chunk_size,
     bool allow_overwrite,
-    bool row_major
+    bool row_major,
+    uint32_t gzip_level
 ) {
-    H5WriterBuilder wb(file, group, buffer_size, chunk_size, allow_overwrite);
+    H5WriterBuilder wb(file, group, buffer_size, chunk_size, allow_overwrite, gzip_level);
     write_packed_matrix<float>(wb, matrix, row_major);
 }
 // [[Rcpp::export]]
@@ -564,9 +564,10 @@ void write_unpacked_matrix_hdf5_double_cpp(
     uint32_t buffer_size,
     uint32_t chunk_size,
     bool allow_overwrite,
-    bool row_major
+    bool row_major,
+    uint32_t gzip_level
 ) {
-    H5WriterBuilder wb(file, group, buffer_size, chunk_size, allow_overwrite);
+    H5WriterBuilder wb(file, group, buffer_size, chunk_size, allow_overwrite, gzip_level);
     write_unpacked_matrix<double>(wb, matrix, row_major);
 }
 // [[Rcpp::export]]
@@ -577,36 +578,84 @@ void write_packed_matrix_hdf5_double_cpp(
     uint32_t buffer_size,
     uint32_t chunk_size,
     bool allow_overwrite,
-    bool row_major
+    bool row_major,
+    uint32_t gzip_level
 ) {
-    H5WriterBuilder wb(file, group, buffer_size, chunk_size, allow_overwrite);
+    H5WriterBuilder wb(file, group, buffer_size, chunk_size, allow_overwrite, gzip_level);
     write_packed_matrix<double>(wb, matrix, row_major);
 }
 
 ///////// 3rd PARTY COMPATIBILITY HDF5 MATRIX FUNCTIONS //////////
 
+// 10x matrix //////////
+
 // [[Rcpp::export]]
-List dims_matrix_10x_hdf5_cpp(std::string file, uint32_t buffer_size) {
-    return dims_matrix(open10xFeatureMatrix(file, buffer_size), false);
+List dims_matrix_10x_hdf5_cpp(std::string file, std::string group, uint32_t buffer_size) {
+    std::string type = get10xMatrixType(file, group);
+    List l;
+    if (type == "uint32_t") {
+        l = dims_matrix(open10xFeatureMatrix<uint32_t>(file, group, buffer_size), false);
+    } else if (type == "uint64_t") {
+        l = dims_matrix(open10xFeatureMatrix<uint64_t>(file, group, buffer_size), false);
+    } else if (type == "float") {
+        l = dims_matrix(open10xFeatureMatrix<float>(file, group, buffer_size), false);
+    } else if (type == "double") {
+        l = dims_matrix(open10xFeatureMatrix<double>(file, group, buffer_size), false);
+    } else {
+        throw std::runtime_error("dims_matrix_10x_hdf5_cpp: Unrecognized matrix type " + type);
+    }
+    l["type"] = type;
+    return l;
 }
 
 // [[Rcpp::export]]
 SEXP iterate_matrix_10x_hdf5_cpp(
     std::string file,
+    std::string group,
     uint32_t buffer_size,
     const StringVector row_names,
     const StringVector col_names
 ) {
-    return make_unique_xptr<StoredMatrix<uint32_t>>(open10xFeatureMatrix(
-        file,
-        buffer_size,
-        std::make_unique<RcppStringReader>(row_names),
-        std::make_unique<RcppStringReader>(col_names)
-    ));
+    std::string type = get10xMatrixType(file, group);
+    if (type == "uint32_t") {
+        return make_unique_xptr<StoredMatrix<uint32_t>>(open10xFeatureMatrix<uint32_t>(
+            file,
+            group,
+            buffer_size,
+            std::make_unique<RcppStringReader>(row_names),
+            std::make_unique<RcppStringReader>(col_names)
+        ));
+    } else if (type == "uint64_t") {
+        return make_unique_xptr<StoredMatrix<uint64_t>>(open10xFeatureMatrix<uint64_t>(
+            file,
+            group,
+            buffer_size,
+            std::make_unique<RcppStringReader>(row_names),
+            std::make_unique<RcppStringReader>(col_names)
+        ));
+    } else if (type == "float") {
+        return make_unique_xptr<StoredMatrix<float>>(open10xFeatureMatrix<float>(
+            file,
+            group,
+            buffer_size,
+            std::make_unique<RcppStringReader>(row_names),
+            std::make_unique<RcppStringReader>(col_names)
+        ));
+    } else if (type == "double") {
+        return make_unique_xptr<StoredMatrix<double>>(open10xFeatureMatrix<double>(
+            file,
+            group,
+            buffer_size,
+            std::make_unique<RcppStringReader>(row_names),
+            std::make_unique<RcppStringReader>(col_names)
+        ));
+    } else {
+        throw std::runtime_error("iterate_matrix_10x_hdf5_cpp: Unrecognized matrix type " + type);
+    }
 }
 
-// [[Rcpp::export]]
-void write_matrix_10x_hdf5_cpp(
+template <typename T>
+void write_matrix_10x_hdf5_base(
     SEXP matrix,
     std::string path,
     StringVector barcodes,
@@ -615,9 +664,10 @@ void write_matrix_10x_hdf5_cpp(
     StringVector feature_types,
     List feature_metadata,
     uint32_t buffer_size,
-    uint32_t chunk_size
+    uint32_t chunk_size,
+    uint32_t gzip_level
 ) {
-    auto loader = take_unique_xptr<MatrixLoader<uint32_t>>(matrix);
+    auto loader = take_unique_xptr<MatrixLoader<T>>(matrix);
     loader->restart();
     std::map<std::string, std::unique_ptr<StringReader>> metadata;
     StringVector metadata_names = feature_metadata.names();
@@ -625,7 +675,7 @@ void write_matrix_10x_hdf5_cpp(
         metadata[std::string(metadata_names[i])] =
             std::make_unique<RcppStringReader>(Rcpp::as<StringVector>(feature_metadata[i]));
     }
-    StoredMatrixWriter<uint32_t> w = create10xFeatureMatrix(
+    StoredMatrixWriter<T> w = create10xFeatureMatrix<T>(
         path,
         RcppStringReader(barcodes),
         RcppStringReader(feature_ids),
@@ -633,15 +683,100 @@ void write_matrix_10x_hdf5_cpp(
         RcppStringReader(feature_types),
         metadata,
         buffer_size,
-        chunk_size
+        chunk_size,
+        gzip_level
     );
-    run_with_R_interrupt_check(&StoredMatrixWriter<uint32_t>::write, &w, std::ref(*loader));
+    run_with_R_interrupt_check(&StoredMatrixWriter<T>::write, &w, std::ref(*loader));
 }
+
+// [[Rcpp::export]]
+void write_matrix_10x_hdf5_cpp(
+    SEXP matrix,
+    std::string path,
+    std::string type,
+    StringVector barcodes,
+    StringVector feature_ids,
+    StringVector feature_names,
+    StringVector feature_types,
+    List feature_metadata,
+    uint32_t buffer_size,
+    uint32_t chunk_size,
+    uint32_t gzip_level
+) {
+    if (type == "uint32_t") {
+        write_matrix_10x_hdf5_base<uint32_t>(
+            matrix,
+            path,
+            barcodes,
+            feature_ids,
+            feature_names,
+            feature_types,
+            feature_metadata,
+            buffer_size,
+            chunk_size,
+            gzip_level
+        );
+    } else if (type == "uint64_t") {
+        write_matrix_10x_hdf5_base<uint64_t>(
+            matrix,
+            path,
+            barcodes,
+            feature_ids,
+            feature_names,
+            feature_types,
+            feature_metadata,
+            buffer_size,
+            chunk_size,
+            gzip_level
+        );
+    } else if (type == "float") {
+        write_matrix_10x_hdf5_base<float>(
+            matrix,
+            path,
+            barcodes,
+            feature_ids,
+            feature_names,
+            feature_types,
+            feature_metadata,
+            buffer_size,
+            chunk_size,
+            gzip_level
+        );
+    } else if (type == "double") {
+        write_matrix_10x_hdf5_base<double>(
+            matrix,
+            path,
+            barcodes,
+            feature_ids,
+            feature_names,
+            feature_types,
+            feature_metadata,
+            buffer_size,
+            chunk_size,
+            gzip_level
+        );
+    } else {
+        throw std::runtime_error("write_matrix_10x_hdf5_cpp: unsupported type " + type);
+    }
+}
+
+// AnnData //////////
 
 // [[Rcpp::export]]
 List dims_matrix_anndata_hdf5_cpp(std::string file, std::string group, uint32_t buffer_size) {
     bool transpose = isRowOrientedAnnDataMatrix(file, group);
-    List l = dims_matrix(openAnnDataMatrix(file, group, buffer_size), transpose);
+    std::string type = getAnnDataMatrixType(file, group);
+    List l;
+    if (type == "uint32_t") {
+        l = dims_matrix(openAnnDataMatrix<uint32_t>(file, group, buffer_size), transpose);
+    } else if (type == "float") {
+        l = dims_matrix(openAnnDataMatrix<float>(file, group, buffer_size), transpose);
+    } else if (type == "double") {
+        l = dims_matrix(openAnnDataMatrix<double>(file, group, buffer_size), transpose);
+    } else {
+        throw std::runtime_error("dims_matrix_anndata_hdf5_cpp: Unrecognized matrix type " + type);
+    }
+    l["type"] = type;
     return l;
 }
 
@@ -649,17 +784,92 @@ List dims_matrix_anndata_hdf5_cpp(std::string file, std::string group, uint32_t 
 SEXP iterate_matrix_anndata_hdf5_cpp(
     std::string file,
     std::string group,
+    std::string type,
     uint32_t buffer_size,
     const StringVector row_names,
     const StringVector col_names
 ) {
-    return make_unique_xptr<StoredMatrix<float>>(openAnnDataMatrix(
-        file,
-        group,
-        buffer_size,
-        std::make_unique<RcppStringReader>(row_names),
-        std::make_unique<RcppStringReader>(col_names)
-    ));
+    std::string file_type = getAnnDataMatrixType(file, group);
+    if (type != file_type) {
+        std::stringstream ss;
+        ss << "iterate_matrix_anndata_hdf5_cpp: Found type '" << file_type << "' expected '" << type
+           << "'";
+        throw std::runtime_error(ss.str());
+    }
+    if (type == "uint32_t") {
+        return make_unique_xptr<StoredMatrix<uint32_t>>(openAnnDataMatrix<uint32_t>(
+            file,
+            group,
+            buffer_size,
+            std::make_unique<RcppStringReader>(row_names),
+            std::make_unique<RcppStringReader>(col_names)
+        ));
+    } else if (type == "float") {
+        return make_unique_xptr<StoredMatrix<float>>(openAnnDataMatrix<float>(
+            file,
+            group,
+            buffer_size,
+            std::make_unique<RcppStringReader>(row_names),
+            std::make_unique<RcppStringReader>(col_names)
+        ));
+    } else if (type == "double") {
+        return make_unique_xptr<StoredMatrix<double>>(openAnnDataMatrix<double>(
+            file,
+            group,
+            buffer_size,
+            std::make_unique<RcppStringReader>(row_names),
+            std::make_unique<RcppStringReader>(col_names)
+        ));
+    } else {
+        throw std::runtime_error("iterate_matrix_anndata_hdf5_cpp: Unsupported type " + type);
+    }
+}
+
+template <typename T>
+void write_matrix_anndata_hdf5_base(
+    SEXP matrix,
+    std::string file,
+    std::string group,
+    bool row_major,
+    uint32_t buffer_size,
+    uint32_t chunk_size,
+    uint32_t gzip_level
+) {
+    auto loader = take_unique_xptr<MatrixLoader<T>>(matrix);
+    loader->restart();
+
+    StoredMatrixWriter<T> w =
+        createAnnDataMatrix<T>(file, group, row_major, buffer_size, chunk_size, gzip_level);
+    run_with_R_interrupt_check(&StoredMatrixWriter<T>::write, &w, std::ref(*loader));
+    createAnnDataObsVarIfMissing(*loader, file, row_major, gzip_level);
+}
+
+// [[Rcpp::export]]
+void write_matrix_anndata_hdf5_cpp(
+    SEXP matrix,
+    std::string file,
+    std::string group,
+    std::string type,
+    bool row_major,
+    uint32_t buffer_size,
+    uint32_t chunk_size,
+    uint32_t gzip_level
+) {
+    if (type == "uint32_t") {
+        write_matrix_anndata_hdf5_base<uint32_t>(
+            matrix, file, group, row_major, buffer_size, chunk_size, gzip_level
+        );
+    } else if (type == "float") {
+        write_matrix_anndata_hdf5_base<float>(
+            matrix, file, group, row_major, buffer_size, chunk_size, gzip_level
+        );
+    } else if (type == "double") {
+        write_matrix_anndata_hdf5_base<double>(
+            matrix, file, group, row_major, buffer_size, chunk_size, gzip_level
+        );
+    } else {
+        throw std::runtime_error("write_matrix_anndata_hdf5_cpp: unsupported type " + type);
+    }
 }
 
 // [[Rcpp::export]]
@@ -679,6 +889,14 @@ bool hdf5_group_exists_cpp(std::string path, std::string group) {
     H5ReaderBuilder rb(path, "/", 1);
     return rb.getGroup().exist(group);
 }
+
+// [[Rcpp::export]]
+std::vector<std::string> hdf5_group_objnames_cpp(std::string path, std::string group) {
+    H5ReaderBuilder rb(path, group, 1);
+    return rb.getGroup().listObjectNames();
+}
+
+// MTX format
 
 // [[Rcpp::export]]
 void import_matrix_market_cpp(

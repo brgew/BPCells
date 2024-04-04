@@ -19,27 +19,25 @@ setMethod("matrix_type", "TransformedMatrix", function(x) "double")
 # Subsetting on TransformedMatrix objects
 setMethod("[", "TransformedMatrix", function(x, i, j, ...) {
   if (missing(x)) stop("x is missing in matrix selection")
-
-  i <- selection_index(i, nrow(x), rownames(x))
-  j <- selection_index(j, ncol(x), colnames(x))
-  x <- selection_fix_dims(x, rlang::maybe_missing(i), rlang::maybe_missing(j))
-
-  x@matrix <- x@matrix[rlang::maybe_missing(i), rlang::maybe_missing(j)]
-
+  # Handle transpose via recursive call
   if (x@transpose) {
-    tmp <- rlang::maybe_missing(i)
-    i <- rlang::maybe_missing(j)
-    j <- rlang::maybe_missing(tmp)
+    return(t(t(x)[rlang::maybe_missing(j), rlang::maybe_missing(i)]))
   }
+
+  i <- split_selection_index(i, nrow(x), rownames(x))
+  j <- split_selection_index(j, ncol(x), colnames(x))
+  
+  x <- selection_fix_dims(x, rlang::maybe_missing(i$subset), rlang::maybe_missing(j$subset))
+  x@matrix <- x@matrix[rlang::maybe_missing(i$subset), rlang::maybe_missing(j$subset)]
 
   # Subset the row/col params
-  if (!rlang::is_missing(i) && ncol(x@row_params) != 0) {
-    x@row_params <- x@row_params[, i, drop = FALSE]
+  if (ncol(x@row_params) != 0) {
+    x@row_params <- x@row_params[, rlang::maybe_missing(i$subset), drop = FALSE]
   }
-  if (!rlang::is_missing(j) && ncol(x@col_params) != 0) {
-    x@col_params <- x@col_params[, j, drop = FALSE]
+  if (ncol(x@col_params) != 0) {
+    x@col_params <- x@col_params[, rlang::maybe_missing(j$subset), drop = FALSE]
   }
-  x
+  callNextMethod(x, rlang::maybe_missing(i$reorder), rlang::maybe_missing(j$reorder))
 })
 
 #################
@@ -218,9 +216,10 @@ setMethod("short_description", "TransformMinByRow", function(x) {
     x@row_params <- x@row_params[,c(1:print_entries, ncol(x@row_params)),drop=FALSE]
   }
   
+  label <- if (x@transpose) "col" else "row"
   c(
     short_description(x@matrix),
-    sprintf("Transform min by row: %s", pretty_print_vector(sprintf("%.3g", x@row_params[1, ]), max_len = 3))
+    sprintf("Transform min by %s: %s", label, pretty_print_vector(sprintf("%.3g", x@row_params[1, ]), max_len = 3))
   )
 })
 
@@ -228,6 +227,9 @@ setMethod("short_description", "TransformMinByRow", function(x) {
 #' @description **min_by_row**: Take the minimum with a per-row constant
 #' @export
 min_by_row <- function(mat, vals) {
+  if (mat@transpose) {
+    return(t(min_by_col(t(mat), vals)))
+  }
   assert_is(mat, "IterableMatrix")
   assert_is(vals, "numeric")
   assert_greater_than_zero(vals)
@@ -247,10 +249,10 @@ setMethod("short_description", "TransformMinByCol", function(x) {
   if (ncol(x@col_params) > print_entries + 1) {
     x@col_params <- x@col_params[,c(1:print_entries, ncol(x@col_params)), drop=FALSE]
   }
-  
+  label <- if (x@transpose) "row" else "col"
   c(
     short_description(x@matrix),
-    sprintf("Transform min by col: %s", pretty_print_vector(sprintf("%.3g", x@col_params[1, ]), max_len = 3))
+    sprintf("Transform min by %s: %s", label, pretty_print_vector(sprintf("%.3g", x@col_params[1, ]), max_len = 3))
   )
 })
 
@@ -258,6 +260,9 @@ setMethod("short_description", "TransformMinByCol", function(x) {
 #' @description **min_by_col**: Take the minimum with a per-col constant
 #' @export
 min_by_col <- function(mat, vals) {
+  if (mat@transpose) {
+    return(t(min_by_row(t(mat), vals)))
+  }
   assert_is(mat, "IterableMatrix")
   assert_is(vals, "numeric")
   assert_greater_than_zero(vals)
@@ -284,7 +289,7 @@ setMethod("short_description", "TransformBinarize", function(x) {
   )
 })
 
-#' Binarize converts matrix elements to zeros and ones.
+#' Convert matrix elements to zeros and ones
 #'
 #' @description Binarize compares the matrix element values to the
 #'   threshold value and sets the output elements to either zero
@@ -668,7 +673,9 @@ setMethod("*", signature(e1 = "TransformScaleShift", e2 = "numeric"), function(e
   if (length(y) == 1) {
     # Initialize global_params if necessary
     if (!any(x@active_transforms["global", ])) x@global_params <- c(1, 0)
-    x@global_params[1] <- y * x@global_params[1]
+    if (x@active_transforms["row", "shift"]) x@row_params[2,] <- x@row_params[2,]*y
+    if (x@active_transforms["col", "shift"]) x@col_params[2,] <- x@col_params[2,]*y
+    x@global_params[1] <- x@global_params[1] * y
     x@global_params[2] <- x@global_params[2] * y
     x@active_transforms["global", "scale"] <- TRUE
     return(x)
@@ -683,7 +690,7 @@ setMethod("*", signature(e1 = "TransformScaleShift", e2 = "numeric"), function(e
   }
   if (!x@transpose && x@active_transforms["col", "shift"]) {
     res <- wrapMatrix("TransformScaleShift", x)
-    res@active_transforms["col", "scale"] <- TRUE
+    res@active_transforms["row", "scale"] <- TRUE
     res@row_params <- matrix(c(1, 0), nrow = 2, ncol = nrow(x))
     res@row_params[1, ] <- y
     return(res)
@@ -698,6 +705,12 @@ setMethod("*", signature(e1 = "TransformScaleShift", e2 = "numeric"), function(e
     x@active_transforms["col", "scale"] <- TRUE
 
     # Update shift
+    if (x@active_transforms["global", "shift"]) {
+      x@col_params[2,] <- x@col_params[2,] + x@global_params[2]
+      x@global_params[2] <- 0
+      x@active_transforms["global", "shift"] <- FALSE
+      x@active_transforms["col", "shift"] <- TRUE
+    }
     x@col_params[2, ] <- x@col_params[2, ] * y
   } else {
     # Initialize row_params if necessary
@@ -708,6 +721,12 @@ setMethod("*", signature(e1 = "TransformScaleShift", e2 = "numeric"), function(e
     x@active_transforms["row", "scale"] <- TRUE
 
     # Update shift
+    if (x@active_transforms["global", "shift"]) {
+      x@row_params[2,] <- x@row_params[2,] + x@global_params[2]
+      x@global_params[2] <- 0
+      x@active_transforms["global", "shift"] <- FALSE
+      x@active_transforms["row", "shift"] <- TRUE
+    }
     x@row_params[2, ] <- x@row_params[2, ] * y
   }
   return(x)
@@ -743,7 +762,7 @@ setMethod("+", signature(e1 = "TransformScaleShift", e2 = "numeric"), function(e
     # Initialize row_params if necessary
     if (!any(x@active_transforms["row", ])) x@row_params <- matrix(c(1, 0), nrow = 2, ncol = nrow(x))
 
-    # Update scale
+    # Update shift
     x@row_params[2, ] <- x@row_params[2, ] + y
     x@active_transforms["row", "shift"] <- TRUE
   }
@@ -766,13 +785,14 @@ setMethod("+", signature(e1 = "numeric", e2 = "TransformScaleShift"), function(e
 #' Broadcasting vector arithmetic
 #'
 #' Convenience functions for adding or multiplying
-#' each row / column of a mtarix by a number.
+#' each row / column of a matrix by a number.
 #'
 #' @rdname mat_norm
 #'
 #' @param mat Matrix-like object
 #' @param vec Numeric vector
 #' @return Matrix-like object
+#' @export
 add_rows <- function(mat, vec) {
   assert_is(mat, c("dgCMatrix", "IterableMatrix", "matrix"))
   assert_is_numeric(vec)

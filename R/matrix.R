@@ -19,30 +19,7 @@ setClass("IterableMatrix",
     dimnames = list(NULL, NULL)
   )
 )
-setMethod("dimnames<-", signature(x = "IterableMatrix", value = "list"), function(x, value) {
-  d <- dim(x)
-  has_error <- FALSE
-  if (!is.list(value) || length(value) != 2) has_error <- TRUE
-  if (!is.null(value[[1]]) && length(value[[1]]) != d[1]) has_error <- TRUE
-  if (!is.null(value[[2]]) && length(value[[2]]) != d[2]) has_error <- TRUE
-  if (has_error) stop("Invalid dimnames supplied")
 
-  if (!is.null(value[[1]])) {
-    x@dimnames[[1]] <- as.character(value[[1]])
-  } else {
-    x@dimnames[1] <- list(NULL)
-  }
-  if (!is.null(value[[2]])) {
-    x@dimnames[[2]] <- as.character(value[[2]])
-  } else {
-    x@dimnames[2] <- list(NULL)
-  }
-  x
-})
-setMethod("dimnames<-", signature(x = "IterableMatrix", value = "NULL"), function(x, value) {
-  x@dimnames <- list(NULL, NULL)
-  x
-})
 
 #' Construct an S4 matrix object wrapping another matrix object
 #'
@@ -50,7 +27,7 @@ setMethod("dimnames<-", signature(x = "IterableMatrix", value = "NULL"), functio
 #' @keywords internal
 wrapMatrix <- function(class, m, ...) {
   dimnames <- dimnames(m)
-  if (matrix_is_transform(m)) m@dimnames <- list(NULL, NULL)
+  if (matrix_is_transform(m) && !is(m, "RenameDims")) m@dimnames <- list(NULL, NULL)
   new(class, matrix = m, transpose = m@transpose, dim = m@dim, dimnames = dimnames, ...)
 }
 
@@ -74,6 +51,7 @@ denormalize_dimnames <- function(dimnames) {
 setGeneric("iterate_matrix", function(x) standardGeneric("iterate_matrix"))
 
 #' @describeIn IterableMatrix-methods Get the matrix data type (mat_uint32_t, mat_float, or mat_double for now)
+#' @export
 setGeneric("matrix_type", function(x) standardGeneric("matrix_type"))
 
 #' @describeIn IterableMatrix-methods Get the matrix storage order ("row" or "col")
@@ -111,6 +89,67 @@ setMethod("matrix_inputs<-", "IterableMatrix", function(x, ..., value) {
   }
   rlang::abort(sprintf("matrix_inputs not defined for inputs of type %s", class(x)))
 })
+
+#' Get/set inputs to a matrix transform
+#' 
+#' A matrix object can either be an input (i.e. a file on disk or a raw matrix in memory),
+#' or it can represent a delayed operation on one or more matrices. The `all_matrix_inputs()`
+#' getter and setter functions allow accessing the base-level input matrices as a list, and
+#' changing them. This is useful if you want to re-locate data on disk without losing your
+#' transformed BPCells matrix. (Note: experimental API; potentially subject to revisions).
+#'
+#' 
+#'
+#' @param x IterableMatrix
+#' @param value List of IterableMatrix objects
+#' @return List of IterableMatrix objects. If a matrix `m` is itself an input object, then 
+#'   `all_matrix_inputs(m)` will return `list(m)`.
+#' @export
+all_matrix_inputs <- function(x) {
+  assert_is(x, "IterableMatrix")
+  inputs <- matrix_inputs(x)
+  if (length(inputs) == 0) return(list(x))
+  do.call(c, lapply(inputs, all_matrix_inputs))
+}
+
+#' @rdname all_matrix_inputs
+#' @export
+`all_matrix_inputs<-` <- function(x, value) {
+  # Error checking:
+  # - value should be a list of iterable matrices
+  # - value should be the same length as the existing matrix inputs
+  # - Each iterable matrix should have the same dimensions as the one it's replacing
+  assert_is(value, "list")
+  prev_inputs <- all_matrix_inputs(x)
+  if (length(prev_inputs) != length(value)) {
+    rlang::abort("Error assigning matrix inputs: length mismatch of input list")
+  }
+  for (i in seq_along(value)) {
+    if (!is(value[[i]], "IterableMatrix")) {
+      rlang::abort(sprintf("Error assigning matrix inputs: Entry %d is not an IterableMatrix", i))
+    }
+    if (!all(dim(prev_inputs[[i]]) == dim(value[[i]]))) {
+      rlang::warn(sprintf("Warning assigning matrix inputs: entry %d has mismatched dimensions with the matrix it replaces", i))
+    }
+  }
+
+  # Actual work -- recursively reset the inputs
+  direct_inputs <- matrix_inputs(x)
+  if (length(direct_inputs) == 0) {
+    stopifnot(length(value) == 1)
+    return(value[[1]])
+  }
+  subtree_counts <- lapply(direct_inputs, function(x) length(all_matrix_inputs(x)))
+  stopifnot(sum(as.integer(subtree_counts)) == length(value))
+  start <- 1L
+  for (i in seq_along(direct_inputs)) {
+    end <- start + subtree_counts[[i]] - 1L
+    all_matrix_inputs(direct_inputs[[i]]) <- value[start:end]
+    start <- end + 1L
+  }
+  matrix_inputs(x) <- direct_inputs
+  x
+}
 
 setMethod("short_description", "IterableMatrix", function(x) {
   character(0)
@@ -363,15 +402,19 @@ setMethod("[", "MatrixMultiply", function(x, i, j, ...) {
     return(t(t(x)[rlang::maybe_missing(j), rlang::maybe_missing(i)]))
   }
 
-  i <- selection_index(i, nrow(x), rownames(x))
-  j <- selection_index(j, ncol(x), colnames(x))
-  x <- selection_fix_dims(x, rlang::maybe_missing(i), rlang::maybe_missing(j))
+  i <- split_selection_index(i, nrow(x), rownames(x))
+  j <- split_selection_index(j, ncol(x), colnames(x))
+  # If we're just reordering rows/cols, do a standard matrix selection
+  if (rlang::is_missing(i$subset) && rlang::is_missing(j$subset)) {
+    return(callNextMethod(x, unsplit_selection(i), unsplit_selection(j)))
+  }
+  x <- selection_fix_dims(x, rlang::maybe_missing(i$subset), rlang::maybe_missing(j$subset))
 
   # Selection will be a no-op if i or j is missing
-  x@left <- x@left[rlang::maybe_missing(i), ]
-  x@right <- x@right[, rlang::maybe_missing(j)]
+  x@left <- x@left[rlang::maybe_missing(i$subset), ]
+  x@right <- x@right[, rlang::maybe_missing(j$subset)]
 
-  x
+  x[rlang::maybe_missing(i$reorder),rlang::maybe_missing(j$reorder)]
 })
 
 setClass("MatrixMask",
@@ -557,7 +600,9 @@ selection_index <- function(selection, dim_len, dimnames) {
     indices <- seq_len(dim_len)
     names(indices) <- dimnames
     if (!is.logical(selection)) assert_distinct(selection, n = 2)
-    return(vctrs::vec_slice(indices, selection))
+    res <- vctrs::vec_slice(indices, selection)
+    names(res) <- NULL
+    return(res)
   } else {
     return(rlang::missing_arg())
   }
@@ -575,6 +620,31 @@ selection_fix_dims <- function(x, i, j) {
   }
   x
 }
+
+# Helper function to split a selection into two components:
+# First a subset, followed by a reorder.
+# Set subset or reorder to rlang::missing_arg() if they are an identity transformation
+# When we push down subset operations, we'll just push down the subset, and not the reorder
+# Use instead of `selection_index()`. Convert these results into the equivalent from `selection_index()` by
+# calling `unsplit_selection()`
+split_selection_index <- function(selection, dim_len, dimnames) {
+  selection <- selection_index(selection, dim_len, dimnames)
+  if (rlang::is_missing(selection)) {
+    return(list(subset=rlang::missing_arg(), reorder=rlang::missing_arg()))
+  }
+  res <- list(subset = sort(selection), reorder=rank(selection, ties.method="first"))
+  if (length(res$subset) == dim_len) res$subset <- rlang::missing_arg()
+  if (all(res$reorder == seq_along(res$reorder))) res$reorder <- rlang::missing_arg()
+  return(res)
+}
+
+# Reverse split_selection
+unsplit_selection <- function(selection) {
+  if (rlang::is_missing(selection$subset)) return(rlang::maybe_missing(selection$reorder))
+  if (rlang::is_missing(selection$reorder)) return(selection$subset)
+  selection$subset[selection$reorder]
+}
+
 setMethod("[", "IterableMatrix", function(x, i, j, ...) {
   if (missing(x)) stop("x is missing in matrix selection")
   if (rlang::is_missing(i) && rlang::is_missing(j)) {
@@ -584,6 +654,12 @@ setMethod("[", "IterableMatrix", function(x, i, j, ...) {
   ret <- wrapMatrix("MatrixSubset", x)
   i <- selection_index(i, nrow(x), rownames(x))
   j <- selection_index(j, ncol(x), colnames(x))
+ 
+  # Check for a trivial selection that doesn't introduce any subset
+  if ((rlang::is_missing(i) || isTRUE(all.equal(i, seq_len(nrow(x))))) && 
+      (rlang::is_missing(j) || isTRUE(all.equal(j, seq_len(ncol(x)))))) {
+    return(x)
+  }
   ret <- selection_fix_dims(ret, rlang::maybe_missing(i), rlang::maybe_missing(j))
 
   if (x@transpose) {
@@ -602,17 +678,81 @@ setMethod("[", "IterableMatrix", function(x, i, j, ...) {
   ret
 })
 
+# Simulate assigning to a subset of the matrix.
+# We concatenate the un-modified matrix subsets with the new values,
+# then reorder rows/columns appropriately
+setMethod("[<-", "IterableMatrix", function(x, i, j, ..., value) {
+  # Do type conversions if needed
+  if (is.matrix(value)) value <- as(value, "dgCMatrix")
+  if (is(value, "dgCMatrix")) {
+    if (x@transpose) {
+      value <- t(as(t(value), "IterableMatrix"))
+    } else {
+      value <- as(value, "IterableMatrix")
+    }
+    if (matrix_type(value) != matrix_type(x)) {
+      rlang::warn(c(
+        "Converting input matrix type to match destination",
+        sprintf("input type: %s", matrix_type(value)),
+        sprintf("destination type: %s", matrix_type(x))
+      ))
+      value <- convert_matrix_type(value, matrix_type(x))
+    }
+  }
+
+  rownames(value) <- if (rlang::is_missing(i)) rownames(x) else rownames(x)[i]
+  colnames(value) <- if (rlang::is_missing(j)) colnames(x) else colnames(x)[j]
+  
+  if (!rlang::is_missing(i)) {
+    i <- selection_index(i, nrow(x), rownames(x))
+    ni <- if (length(i) > 0) seq_len(nrow(x))[-i] else seq_len(nrow(x))
+    
+    x_i <- x[i,]
+    x_ni <- x[ni,]
+    
+    if (rlang::is_missing(j)) {
+      if (any(dim(x_i) != dim(value))) {
+        stop("Mismatched dimensions in assignment to subset")
+      }
+      x_i <- value
+    } else {
+      x_i[,j] <- value
+    }
+    rownames(x_i) <- rownames(x)[i]
+    x <- rbind(x_i, x_ni)[order(c(i, ni)),]
+  } else if(!rlang::is_missing(j)) {
+    j <- selection_index(j, ncol(x), colnames(x))
+    nj <- if (length(j) > 0) seq_len(ncol(x))[-j] else seq_len(ncol(x))
+    
+    x_j <- x[,j]
+    x_nj <- x[,nj]
+    if (any(dim(x_j) != dim(value))) {
+      stop("Mismatched dimensions in assignment to subset")
+    }
+    x_j <- value
+    colnames(x_j) <- colnames(x)[j]
+    x <- cbind(x_j, x_nj)[,order(c(j, nj))]
+  } else {
+    if (any(dim(x) != dim(value))) {
+      stop("Mismatched dimensions in assignment to subset")
+    }
+    x <- value
+  }
+  
+  return(x)
+})
+
 setMethod("[", "MatrixSubset", function(x, i, j, ...) {
   if (missing(x)) stop("x is missing in matrix selection")
+  
+  if (x@transpose) {
+    return(t(t(x)[rlang::maybe_missing(j), rlang::maybe_missing(i)]))
+  }
+
   i <- selection_index(i, nrow(x), rownames(x))
   j <- selection_index(j, ncol(x), colnames(x))
   x <- selection_fix_dims(x, rlang::maybe_missing(i), rlang::maybe_missing(j))
 
-  if (x@transpose) {
-    tmp <- rlang::maybe_missing(i)
-    i <- rlang::maybe_missing(j)
-    j <- rlang::maybe_missing(tmp)
-  }
   if (!rlang::is_missing(i)) {
     if (length(x@row_selection) == 0 && !x@zero_dims[1]) {
       x@row_selection <- i
@@ -629,7 +769,13 @@ setMethod("[", "MatrixSubset", function(x, i, j, ...) {
     }
     x@zero_dims[2] <- length(j) == 0
   }
-  x
+  # Apply the consolidated selection to the inner matrix in case there is some
+  # new subsetting that should be pushed down further
+  i <- if(length(x@row_selection) == 0 && !x@zero_dims[1]) rlang::missing_arg() else x@row_selection
+  j <- if(length(x@col_selection) == 0 && !x@zero_dims[2]) rlang::missing_arg() else x@col_selection
+  res <- x@matrix[rlang::maybe_missing(i), rlang::maybe_missing(j)]
+  dimnames(res) <- dimnames(x)
+  res
 })
 
 
@@ -665,6 +811,81 @@ setMethod("short_description", "MatrixSubset", function(x) {
   )
 })
 
+# Renaming dims
+setClass("RenameDims",
+  contains = "IterableMatrix",
+  slots = c(
+    matrix = "IterableMatrix"
+  )
+)
+setMethod("matrix_type", "RenameDims", function(x) matrix_type(x@matrix))
+setMethod("iterate_matrix", "RenameDims", function(x) {
+  if (x@transpose) {
+    return(iterate_matrix(t(x)))
+  }
+  assert_true(matrix_type(x) %in% c("uint32_t", "float", "double"))
+  
+  iter_function <- get(sprintf("iterate_matrix_rename_dims_%s_cpp", matrix_type(x)))
+  row_names <- if (is.null(rownames(x))) character(0) else rownames(x)
+  col_names <- if (is.null(colnames(x))) character(0) else colnames(x)
+
+  iter_function(iterate_matrix(x@matrix), row_names, col_names, is.null(rownames(x)), is.null(colnames(x)))
+})
+
+setMethod("[", "RenameDims", function(x, i, j, ...) {
+  if (missing(x)) stop("x is missing in matrix selection")
+
+  i <- selection_index(i, nrow(x), rownames(x))
+  j <- selection_index(j, ncol(x), colnames(x))
+  x <- selection_fix_dims(x, rlang::maybe_missing(i), rlang::maybe_missing(j))
+
+  x@matrix <- x@matrix[rlang::maybe_missing(i), rlang::maybe_missing(j)]
+
+  if (x@transpose) {
+    tmp <- rlang::maybe_missing(i)
+    i <- rlang::maybe_missing(j)
+    j <- rlang::maybe_missing(tmp)
+  }
+  x
+})
+setMethod("short_description", "RenameDims", function(x) {
+  c(
+    short_description(x@matrix),
+    sprintf("Reset dimnames")
+  )
+})
+setMethod("dimnames<-", signature(x = "IterableMatrix", value = "list"), function(x, value) {
+  if (identical(dimnames(x), value)) return(x)
+  d <- dim(x)
+  has_error <- FALSE
+  if (!is.list(value) || length(value) != 2) has_error <- TRUE
+  if (!is.null(value[[1]]) && length(value[[1]]) != d[1]) has_error <- TRUE
+  if (!is.null(value[[2]]) && length(value[[2]]) != d[2]) has_error <- TRUE
+  if (has_error) stop("Invalid dimnames supplied")
+
+  if (!is(x, "RenameDims")) {
+    x <- wrapMatrix("RenameDims", x)
+  }
+  if (!is.null(value[[1]])) {
+    x@dimnames[[1]] <- as.character(value[[1]])
+  } else {
+    x@dimnames[1] <- list(NULL)
+  }
+  if (!is.null(value[[2]])) {
+    x@dimnames[[2]] <- as.character(value[[2]])
+  } else {
+    x@dimnames[2] <- list(NULL)
+  }
+  x
+})
+setMethod("dimnames<-", signature(x = "IterableMatrix", value = "NULL"), function(x, value) {
+  if (identical(dimnames(x), value)) return(x)
+  if (!is(x, "RenameDims")) {
+    x <- wrapMatrix("RenameDims", x)
+  }
+  x@dimnames <- list(NULL, NULL)
+  x
+})
 
 # Concatenating matrices by row or by column
 
@@ -678,7 +899,7 @@ concat_dimnames <- function(x, y, len_x, len_y, warning_prefix, dim_type) {
     return(c(x, y))
   }
   warning(sprintf(
-    "%s: %s names presenent on some but not all matrices. Setting missing names to \"\"",
+    "%s: %s names present on some but not all matrices. Setting missing names to \"\"",
     warning_prefix, dim_type
   ), call. = FALSE)
   if (is.null(x)) x <- rep_len("", len_x)
@@ -704,10 +925,12 @@ merge_dimnames <- function(x, y, warning_prefix, dim_type) {
 setClass("RowBindMatrices",
   contains = "IterableMatrix",
   slots = c(
-    matrix_list = "list"
+    matrix_list = "list",
+    threads = "integer"
   ),
   prototype = list(
-    matrix_list = list()
+    matrix_list = list(),
+    threads = 0L
   )
 )
 setMethod("matrix_type", signature(x = "RowBindMatrices"), function(x) matrix_type(x@matrix_list[[1]]))
@@ -715,7 +938,7 @@ setMethod("matrix_type", signature(x = "RowBindMatrices"), function(x) matrix_ty
 setMethod("iterate_matrix", "RowBindMatrices", function(x) {
   iter_function <- get(sprintf("iterate_matrix_row_bind_%s_cpp", matrix_type(x)))
   iterators <- lapply(x@matrix_list, iterate_matrix)
-  iter_function(iterators)
+  iter_function(iterators, x@threads)
 })
 
 setMethod("matrix_inputs", "RowBindMatrices", function(x) x@matrix_list)
@@ -729,24 +952,30 @@ setMethod("matrix_inputs<-", "RowBindMatrices", function(x, ..., value) {
 
 setMethod("short_description", "RowBindMatrices", function(x) {
   sprintf(
-    "Concatenate rows of %d matrix objects with classes%s",
+    "Concatenate %s of %d matrix objects with classes%s (threads=%d)",
+    ifelse(x@transpose, "cols", "rows"),
     length(x@matrix_list),
-    pretty_print_vector(vapply(x@matrix_list, class, character(1)), prefix = ": ", max_len = 3)
+    pretty_print_vector(vapply(x@matrix_list, class, character(1)), prefix = ": ", max_len = 3),
+    x@threads
   )
 })
 
 setMethod("rbind2", signature(x = "IterableMatrix", y = "IterableMatrix"), function(x, y, ...) {
   if (x@transpose != y@transpose) stop("Cannot merge matrices with different interal transpose states.\nPlease use transpose_storage_order().")
+  if (matrix_type(x) != matrix_type(y)) stop("Cannot merge matrices with different data type.\nPlease use convert_matrix_type().")
   if (x@transpose) {
     return(t(cbind2(t(x), t(y))))
   }
 
   if (ncol(x) != ncol(y)) stop("Error in rbind: matrices must have equal number of columns")
+  if (nrow(x) == 0) return(y)
+  if (nrow(y) == 0) return(x)
+
   # Handle dimnames
   col_names <- merge_dimnames(colnames(x), colnames(y), "rbind", "column")
   row_names <- concat_dimnames(rownames(x), rownames(y), nrow(x), nrow(y), "rbind", "row")
-  if (matrix_is_transform(x)) x@dimnames <- list(NULL, NULL)
-  if (matrix_is_transform(y)) y@dimnames <- list(NULL, NULL)
+  if (matrix_is_transform(x) && !is(x, "RenameDims")) x@dimnames <- list(NULL, NULL)
+  if (matrix_is_transform(y) && !is(y, "RenameDims")) y@dimnames <- list(NULL, NULL)
 
   matrix_list <- list()
   if (is(x, "RowBindMatrices")) {
@@ -763,13 +992,31 @@ setMethod("rbind2", signature(x = "IterableMatrix", y = "IterableMatrix"), funct
   new("RowBindMatrices", matrix_list = matrix_list, dim = c(nrow(x) + nrow(y), ncol(x)), dimnames = list(row_names, col_names), transpose = FALSE)
 })
 
+#' Set matrix op thread count
+#'
+#' Set number of threads to use for sparse-dense multiply and matrix_stats.
+#'
+#' Only valid for concatenated matrices
+#' @param mat IterableMatrix, product of rbind or cbind
+#' @param threads Number of threads to use for execution
+#' @keywords internal
+set_threads <- function(mat, threads=0L) {
+  assert_is(mat, c("RowBindMatrices", "ColBindMatrices"))
+  assert_is_wholenumber(threads)
+  assert_true(threads >= 0)
+  mat@threads <- as.integer(threads)
+  mat
+}
+
 setClass("ColBindMatrices",
   contains = "IterableMatrix",
   slots = c(
-    matrix_list = "list"
+    matrix_list = "list",
+    threads = "integer"
   ),
   prototype = list(
-    matrix_list = list()
+    matrix_list = list(),
+    threads = 0L
   )
 )
 setMethod("matrix_type", signature(x = "ColBindMatrices"), function(x) matrix_type(x@matrix_list[[1]]))
@@ -777,7 +1024,7 @@ setMethod("matrix_type", signature(x = "ColBindMatrices"), function(x) matrix_ty
 setMethod("iterate_matrix", "ColBindMatrices", function(x) {
   iter_function <- get(sprintf("iterate_matrix_col_bind_%s_cpp", matrix_type(x)))
   iterators <- lapply(x@matrix_list, iterate_matrix)
-  iter_function(iterators)
+  iter_function(iterators, x@threads)
 })
 
 setMethod("matrix_inputs", "ColBindMatrices", function(x) x@matrix_list)
@@ -792,24 +1039,29 @@ setMethod("matrix_inputs<-", "ColBindMatrices", function(x, ..., value) {
 
 setMethod("short_description", "ColBindMatrices", function(x) {
   sprintf(
-    "Concatenate columns of %d matrix objects with classes%s",
+    "Concatenate %s of %d matrix objects with classes%s (threads=%d)",
+    ifelse(x@transpose, "rows", "cols"),
     length(x@matrix_list),
-    pretty_print_vector(vapply(x@matrix_list, class, character(1)), prefix = ": ", max_len = 3)
+    pretty_print_vector(vapply(x@matrix_list, class, character(1)), prefix = ": ", max_len = 3),
+    x@threads
   )
 })
 
 setMethod("cbind2", signature(x = "IterableMatrix", y = "IterableMatrix"), function(x, y, ...) {
   if (x@transpose != y@transpose) stop("Cannot merge matrices with different interal transpose states.\nPlease use transpose_storage_order().")
+  if (matrix_type(x) != matrix_type(y)) stop("Cannot merge matrices with different data type.\nPlease use convert_matrix_type().")
   if (x@transpose) {
     return(t(rbind2(t(x), t(y))))
   }
 
   if (nrow(x) != nrow(y)) stop("Error in cbind: matrices must have equal number of columns")
+  if (ncol(x) == 0) return(y)
+  if (ncol(y) == 0) return(x)
   # Handle dimnames
   row_names <- merge_dimnames(rownames(x), rownames(y), "cbind", "row")
   col_names <- concat_dimnames(colnames(x), colnames(y), ncol(x), ncol(y), "cbind", "column")
-  if (matrix_is_transform(x)) x@dimnames <- list(NULL, NULL)
-  if (matrix_is_transform(y)) y@dimnames <- list(NULL, NULL)
+  if (matrix_is_transform(x) && !is(x, "RenameDims")) x@dimnames <- list(NULL, NULL)
+  if (matrix_is_transform(y) && !is(y, "RenameDims")) y@dimnames <- list(NULL, NULL)
 
   matrix_list <- list()
   if (is(x, "ColBindMatrices")) {
@@ -825,6 +1077,163 @@ setMethod("cbind2", signature(x = "IterableMatrix", y = "IterableMatrix"), funct
 
   new("ColBindMatrices", matrix_list = matrix_list, dim = c(nrow(x), ncol(x) + ncol(y)), dimnames = list(row_names, col_names), transpose = FALSE)
 })
+
+# Row bind needs specialization because there's not a default row-seek operation
+setMethod("[", "RowBindMatrices", function(x, i, j, ...) {
+  if (missing(x)) stop("x is missing in matrix selection")
+  # Handle transpose via recursive call
+  if (x@transpose) {
+    return(t(t(x)[rlang::maybe_missing(j), rlang::maybe_missing(i)]))
+  }
+
+  i <- split_selection_index(i, nrow(x), rownames(x))
+  j <- split_selection_index(j, ncol(x), colnames(x))
+
+
+  # If we're just reordering rows/cols, do a standard matrix selection
+  if (rlang::is_missing(i$subset) && rlang::is_missing(j$subset)) {
+    return(callNextMethod(x, unsplit_selection(i), unsplit_selection(j)))
+  }
+
+  # if the length of our row selection is 0, do a standard matrix selection
+  if (!rlang::is_missing(i$subset) && length(i$subset) == 0) {
+    return(callNextMethod(x, unsplit_selection(i), unsplit_selection(j)))
+  }
+
+  x <- selection_fix_dims(x, rlang::maybe_missing(i$subset), rlang::maybe_missing(j$subset))
+
+  last_row <- 0L
+  new_mats <- list()
+  for (mat in x@matrix_list) {
+    row_start <- last_row + 1L
+    row_end <- last_row + nrow(mat)
+
+    if (!rlang::is_missing(i$subset)) {
+      local_i <- i$subset[i$subset >= row_start & i$subset <= row_end] - last_row
+      mat <- mat[local_i,]
+    }
+    if (!rlang::is_missing(j$subset)) {
+      # Only pass through the subset operation to a lower-level, not the shuffle
+      mat <- mat[,j$subset]
+    }
+    if (nrow(mat) > 0) {
+      new_mats <- c(new_mats, mat)
+    }
+
+    last_row <- row_end
+  }
+  if (length(new_mats) > 1) {
+    x@matrix_list <- new_mats
+  } else if(length(new_mats) == 1) {
+    dimnames(new_mats[[1]]) <- dimnames(x)
+    x <- new_mats[[1]]
+  } else {
+    stop("Subset RowBindMatrix error: got 0-length matrix_list after subsetting (please report this BPCells bug)")
+  }
+  if (!rlang::is_missing(i$reorder)) {
+    x <- x[i$reorder,]
+  }
+  if (!rlang::is_missing(j$reorder)) {
+    x <- x[,j$reorder]
+  }
+  return(x)
+})
+
+setMethod("[", "ColBindMatrices", function(x, i, j, ...) {
+  if (missing(x)) stop("x is missing in matrix selection")
+  # Handle transpose via recursive call
+  if (x@transpose) {
+    return(t(t(x)[rlang::maybe_missing(j), rlang::maybe_missing(i)]))
+  }
+
+  i <- split_selection_index(i, nrow(x), rownames(x))
+  j <- split_selection_index(j, ncol(x), colnames(x))
+
+
+  # If we're just reordering rows/cols, do a standard matrix selection
+  if (rlang::is_missing(i$subset) && rlang::is_missing(j$subset)) {
+    return(callNextMethod(x, unsplit_selection(i), unsplit_selection(j)))
+  }
+
+  # if the length of our col selection is 0, do a standard matrix selection
+  if (!rlang::is_missing(j$subset) && length(j$subset) == 0) {
+    return(callNextMethod(x, unsplit_selection(i), unsplit_selection(j)))
+  }
+
+  x <- selection_fix_dims(x, rlang::maybe_missing(i$subset), rlang::maybe_missing(j$subset))
+
+  last_col <- 0L
+  new_mats <- list()
+  for (mat in x@matrix_list) {
+    col_start <- last_col + 1L
+    col_end <- last_col + ncol(mat)
+
+    if (!rlang::is_missing(j$subset)) {
+      local_j <- j$subset[j$subset >= col_start & j$subset <= col_end] - last_col
+      mat <- mat[,local_j]
+    }
+    if (!rlang::is_missing(i$subset)) {
+      # Only pass through the subset operation to a lower-level, not the shuffle
+      mat <- mat[i$subset,]
+    }
+    if (ncol(mat) > 0) {
+      new_mats <- c(new_mats, mat)
+    }
+
+    last_col <- col_end
+  }
+  if (length(new_mats) > 1) {
+    x@matrix_list <- new_mats
+  } else if(length(new_mats) == 1) {
+    dimnames(new_mats[[1]]) <- dimnames(x)
+    x <- new_mats[[1]]
+  } else {
+    stop("Subset ColBindMatrix error: got 0-length matrix_list after subsetting (please report this BPCells bug)")
+  }
+  if (!rlang::is_missing(i$reorder)) {
+    x <- x[i$reorder,]
+  }
+  if (!rlang::is_missing(j$reorder)) {
+    x <- x[,j$reorder]
+  }
+  return(x)
+})
+#' Prepare a matrix for multi-threaded operation
+#' 
+#' Transforms a matrix such that `matrix_stats` or matrix multiplies with
+#' a vector/dense matrix will be evaluated in parallel. This only speeds up
+#' those specific operations, not reading or writing the matrix in general.
+#' The parallelism is not guaranteed to work if additional operations are
+#' applied after the parallel split.
+#'
+#' @param mat IterableMatrix
+#' @param threads Number of execution threads
+#' @param chunks Number of chunks to use (>= threads)
+#' @return IterableMatrix which will perform certain operations in parallel
+#' @keywords internal
+parallel_split <- function(mat, threads, chunks=threads) {
+  assert_is(mat, "IterableMatrix")
+  assert_is_wholenumber(threads)
+  assert_is_wholenumber(chunks)
+  assert_true(chunks >= threads)
+
+  if (mat@transpose) {
+    return(t(parallel_split(t(mat), threads, chunks)))
+  }
+
+  start_col <- 1
+  mats <- list()
+  for (i in seq_len(chunks)) {
+    col_count <- (ncol(mat) - start_col + 1) %/% (chunks - i + 1)
+    indices <- seq(start_col, start_col + col_count - 1)
+    start_col <- start_col + col_count
+    subset <- mat[,indices]
+    mats <- c(mats, list(mat[,indices]))
+  }
+  ret <- do.call(cbind, mats)
+  ret@threads <- as.integer(threads)
+  return(ret)
+}
 
 # Packed integer matrix
 setClass("PackedMatrixMemBase",
@@ -1186,7 +1595,16 @@ setMethod("short_description", "MatrixH5", function(x) {
 #' @rdname matrix_io
 #' @inheritParams write_fragments_hdf5
 #' @export
-write_matrix_hdf5 <- function(mat, path, group, compress = TRUE, buffer_size = 8192L, chunk_size = 1024L, overwrite=FALSE) {
+write_matrix_hdf5 <- function(
+    mat, 
+    path, 
+    group, 
+    compress = TRUE, 
+    buffer_size = 8192L, 
+    chunk_size = 1024L, 
+    overwrite = FALSE,
+    gzip_level = 0L
+) {
   assert_is(mat, c("IterableMatrix", "dgCMatrix"))
   if (is(mat, "dgCMatrix")) mat <- as(mat, "IterableMatrix")
 
@@ -1195,7 +1613,7 @@ write_matrix_hdf5 <- function(mat, path, group, compress = TRUE, buffer_size = 8
   assert_is(compress, "logical")
   assert_is(buffer_size, "integer")
   assert_is(chunk_size, "integer")
-  assert_is(overwrite, "logical")
+  assert_is(gzip_level, "integer")
   assert_is(overwrite, c("logical", "character"))
   if (is(overwrite, "character")) {
     assert_true(dir.exists(overwrite))
@@ -1203,6 +1621,12 @@ write_matrix_hdf5 <- function(mat, path, group, compress = TRUE, buffer_size = 8
     overwrite <- TRUE
   } else if (overwrite) {
     overwrite_path <- tempfile("overwrite")
+  }
+
+  if (gzip_level != 0L && compress) {
+     rlang::inform(c(
+        "Warning: Mixing gzip compression (gzip_level > 0) with bitpacking compression (compress=TRUE) may be slower than bitpacking compression alone, with little space savings"
+     ))
   }
 
   assert_true(matrix_type(mat) %in% c("uint32_t", "float", "double"))
@@ -1226,7 +1650,7 @@ write_matrix_hdf5 <- function(mat, path, group, compress = TRUE, buffer_size = 8
   it <- iterate_matrix(mat)
 
   write_function <- get(sprintf("write_%s_matrix_hdf5_%s_cpp", ifelse(compress, "packed", "unpacked"), matrix_type(mat)))
-  write_function(it, path, group, buffer_size, chunk_size, overwrite, mat@transpose)
+  write_function(it, path, group, buffer_size, chunk_size, overwrite, mat@transpose, gzip_level)
 
   if (did_tmp_copy) {
     unlink(overwrite_path, recursive=TRUE)
@@ -1255,19 +1679,23 @@ setClass("10xMatrixH5",
   contains = "IterableMatrix",
   slots = c(
     path = "character",
+    group = "character",
+    type = "character",
     buffer_size = "integer"
   ),
   prototype = list(
     path = character(0),
+    group = "matrix",
+    type = "uint32_t",
     buffer_size = integer(0)
   )
 )
-setMethod("matrix_type", "10xMatrixH5", function(x) "uint32_t")
+setMethod("matrix_type", "10xMatrixH5", function(x) x@type)
 setMethod("matrix_inputs", "10xMatrixH5", function(x) list())
 setMethod("iterate_matrix", "10xMatrixH5", function(x) {
   if (x@transpose) x <- t(x)
   x@dimnames <- denormalize_dimnames(x@dimnames)
-  iterate_matrix_10x_hdf5_cpp(x@path, x@buffer_size, x@dimnames[[1]], x@dimnames[[2]])
+  iterate_matrix_10x_hdf5_cpp(x@path, x@group, x@buffer_size, x@dimnames[[1]], x@dimnames[[2]])
 })
 setMethod("short_description", "10xMatrixH5", function(x) {
   sprintf("10x HDF5 feature matrix in file %s", x@path)
@@ -1288,20 +1716,34 @@ open_matrix_10x_hdf5 <- function(path, feature_type = NULL, buffer_size = 16384L
   assert_is_file(path)
   assert_is(buffer_size, "integer")
   if (!is.null(feature_type)) assert_is(feature_type, "character")
-
   path <- normalizePath(path, mustWork = FALSE)
-  info <- dims_matrix_10x_hdf5_cpp(path, buffer_size)
-  res <- new("10xMatrixH5",
-    path = path, dim = info$dims, buffer_size = buffer_size,
-    dimnames = normalized_dimnames(info$row_names, info$col_names)
-  )
-
-  if (!is.null(feature_type)) {
-    valid_features <- read_hdf5_string_cpp(path, "matrix/features/feature_type", buffer_size) %in% feature_type # nolint
-    res <- res[valid_features, ]
+  all_groups <- hdf5_group_objnames_cpp(path, "/")
+  if ("matrix" %in% all_groups) {
+    # If we detect something that looks like a new-style 10x matrix, 
+    # ignore any other top-level groups in the file
+    all_groups <- "matrix"
   }
-
-  return(res)
+  mats <- list()
+  for (group in all_groups) {
+    # Note: to find old-style 10x files for testing purposes, try these links from 10x:
+    # Dataset description: https://www.10xgenomics.com/datasets/100-1-1-mixture-of-fresh-frozen-human-hek-293-t-and-mouse-nih-3-t-3-cells-2-standard-2-1-0
+    # HDF5 file url: https://cf.10xgenomics.com/samples/cell-exp/2.1.0/hgmm_100/hgmm_100_raw_gene_bc_matrices_h5.h5
+    info <- dims_matrix_10x_hdf5_cpp(path, group, buffer_size)
+    res <- new("10xMatrixH5",
+               path = path, group = group, type = info$type, dim = info$dims, buffer_size = buffer_size,
+               dimnames = normalized_dimnames(info$row_names, info$col_names)
+    )
+    if (!is.null(feature_type)) {
+      valid_features <- read_hdf5_string_cpp(path, file.path(group, "features/feature_type"), buffer_size) %in% feature_type # nolint
+      res <- res[valid_features, ]
+    }
+    mats[[group]] <- res
+  }
+  if (length(mats) == 1) {
+    return(mats[[1]])
+  }
+  rlang::inform("The input HDF5 is detected as an old-style multi-genome file, returning a list of matrices")
+  return(mats)
 }
 
 #' @rdname open_matrix_10x_hdf5
@@ -1313,29 +1755,48 @@ open_matrix_10x_hdf5 <- function(path, feature_type = NULL, buffer_size = 16384L
 #' @param feature_types String or vector of feature types
 #' @param feature_metadata Named list of additional metadata vectors
 #' to store for each feature
+#' @param gzip_level Gzip compression level. Default is 0 (no compression)
+#' @param type Data type of the output matrix. Default is `uint32_t` to match a 
+#' matrix of 10x UMI counts. Non-integer data types include `float` and 
+#' `double`. If `auto`, will use the data type of `mat`.
+#' 
 #' @details Input matrices must be in column-major storage order,
 #' and if the rownames and colnames are not set, names must be
 #' provided for the relevant metadata parameters. Some of the
 #' metadata parameters are not read by default in BPCells, but
 #' it is possible to export them for use with other tools.
 #' @export
-write_matrix_10x_hdf5 <- function(mat,
-                                  path,
-                                  barcodes = colnames(mat),
-                                  feature_ids = rownames(mat),
-                                  feature_names = rownames(mat),
-                                  feature_types = "Gene Expression",
-                                  feature_metadata = list(),
-                                  buffer_size = 16384L,
-                                  chunk_size = 1024L) {
+write_matrix_10x_hdf5 <- function(
+    mat,
+    path,
+    barcodes = colnames(mat),
+    feature_ids = rownames(mat),
+    feature_names = rownames(mat),
+    feature_types = "Gene Expression",
+    feature_metadata = list(),
+    buffer_size = 16384L,
+    chunk_size = 1024L,
+    gzip_level = 0L,
+    type = c("uint32_t", "double", "float", "auto")
+) {
+  type <- match.arg(type)
   assert_is(mat, "IterableMatrix")
   assert_is(path, "character")
   if (mat@transpose) {
-    stop("Matrix must have column-major storage order.\nCall t() or transpose_storage_order() first.")
+    stop(
+      "Matrix must have column-major storage order.\n", 
+      "Call t() or transpose_storage_order() first."
+    )
   }
-  if (matrix_type(mat) != "uint32_t") {
-    warning("Converting to integer matrix for output to 10x format")
-    mat <- convert_matrix_type(mat, "uint32_t")
+  if (type == "auto") {
+    type <- matrix_type(mat)
+  }
+  if (matrix_type(mat) != type) {
+    warning(
+      "Converting from ", matrix_type(mat), " to ", type, 
+      " matrix for output to 10x format"
+    )
+    mat <- convert_matrix_type(mat, type)
   }
   assert_is(barcodes, "character")
   assert_len(barcodes, ncol(mat))
@@ -1362,21 +1823,24 @@ write_matrix_10x_hdf5 <- function(mat,
   }
   assert_is(buffer_size, "integer")
   assert_is(chunk_size, "integer")
-
+  assert_is(gzip_level, "integer")
+  
   path <- normalizePath(path, mustWork = FALSE)
   it <- iterate_matrix(mat)
   write_matrix_10x_hdf5_cpp(
     it,
     path,
+    type = matrix_type(x = mat),
     barcodes,
     feature_ids,
     feature_names,
     feature_types,
     feature_metadata,
     buffer_size,
-    chunk_size
+    chunk_size,
+    gzip_level
   )
-  open_matrix_10x_hdf5(path, buffer_size=buffer_size)
+  open_matrix_10x_hdf5(path, buffer_size = buffer_size)
 }
 
 setClass("AnnDataMatrixH5",
@@ -1384,22 +1848,22 @@ setClass("AnnDataMatrixH5",
   slots = c(
     path = "character",
     group = "character",
-    buffer_size = "integer",
-    storage_transpose = "logical"
+    type = "character",
+    buffer_size = "integer"
   ),
   prototype = list(
     path = character(0),
     group = "matrix",
-    buffer_size = integer(0),
-    storage_transpose = logical(0)
+    type = character(0),
+    buffer_size = integer(0)
   )
 )
-setMethod("matrix_type", "AnnDataMatrixH5", function(x) "float")
+setMethod("matrix_type", "AnnDataMatrixH5", function(x) x@type)
 setMethod("matrix_inputs", "AnnDataMatrixH5", function(x) list())
 setMethod("iterate_matrix", "AnnDataMatrixH5", function(x) {
-  if (x@storage_transpose != x@transpose) x <- t(x)
+  if (x@transpose) x <- t(x)
   x@dimnames <- denormalize_dimnames(x@dimnames)
-  iterate_matrix_anndata_hdf5_cpp(x@path, x@group, x@buffer_size, x@dimnames[[1]], x@dimnames[[2]])
+  iterate_matrix_anndata_hdf5_cpp(x@path, x@group, x@type, x@buffer_size, x@dimnames[[1]], x@dimnames[[2]])
 })
 setMethod("short_description", "AnnDataMatrixH5", function(x) {
   sprintf(
@@ -1408,14 +1872,16 @@ setMethod("short_description", "AnnDataMatrixH5", function(x) {
   )
 })
 
-#' Read AnnData matrix
+#' Read/write AnnData matrix
 #'
-#' Read a sparse integer matrix from an anndata matrix in an hdf5 file.
+#' Read or write a sparse matrix from an anndata hdf5 file. These functions will
+#' automatically transpose matrices when converting to/from the AnnData
+#' format. This is because the AnnData convention stores cells as rows, whereas the R
+#' convention stores cells as columns. If this behavior is undesired, call `t()`
+#' manually on the matrix inputs and outputs of these functions. 
+#' 
 #' @inheritParams open_matrix_hdf5
 #' @return AnnDataMatrixH5 object, with cells as the columns.
-#' @details Since AnnData stores RNA matrices as cells x genes, whereas BPCells
-#'   stores RNA matrices as genes x cells, the returned matrix will be transposed
-#'   relative to the native AnnData matrix.
 #' @export
 open_matrix_anndata_hdf5 <- function(path, group = "X", buffer_size = 16384L) {
   assert_is_file(path)
@@ -1427,10 +1893,32 @@ open_matrix_anndata_hdf5 <- function(path, group = "X", buffer_size = 16384L) {
     path = path, dim = info$dims, buffer_size = buffer_size,
     group = group, dimnames = normalized_dimnames(info$row_names, info$col_names),
     transpose = info$transpose,
-    storage_transpose = info$transpose
+    type = info$type
   )
 
   return(t(res))
+}
+
+#' @rdname open_matrix_anndata_hdf5
+#' @inheritParams open_matrix_anndata_hdf5
+#' @inheritParams write_matrix_hdf5
+#' @param gzip_level Gzip compression level. Default is 0 (no compression)
+#' @export
+write_matrix_anndata_hdf5 <- function(mat, path, group = "X", buffer_size = 16384L, chunk_size = 1024L, gzip_level = 0L) {
+  assert_is(mat, "IterableMatrix")
+  assert_is(path, "character")
+  mat <- t(mat)
+  write_matrix_anndata_hdf5_cpp(
+    iterate_matrix(mat),
+    path,
+    group,
+    matrix_type(mat),
+    mat@transpose,
+    buffer_size,
+    chunk_size,
+    gzip_level
+  )
+  open_matrix_anndata_hdf5(path, group, buffer_size)
 }
 
 #' Import MatrixMarket files
@@ -1546,13 +2034,13 @@ setMethod("matrix_inputs", "PeakMatrix", function(x) list())
 
 #' Calculate ranges x cells overlap matrix
 #' @param fragments Input fragments object. Must have cell names and chromosome names defined
-#' @param ranges GRanges object with the ranges to overlap, or list/data frame with columns chr, start, & end.
+#' @param ranges `r document_granges("Peaks/ranges to overlap,")`
 #' @param mode Mode for counting peak overlaps. (See "value" section for more details)
 #' @inheritParams convert_to_fragments
 #' @param explicit_peak_names Boolean for whether to add rownames to the output matrix in format e.g
 #'  chr1:500-1000, where start and end coords are given in a 0-based coordinate system.
 #'  Note that either way, peak names will be written when the matrix is saved.
-#' @note When calculating the matrix directly from a fragments tsv, it's necessary to first call `select_chromosomes` in order to
+#' @note When calculating the matrix directly from a fragments tsv, it's necessary to first call `select_chromosomes()` in order to
 #'     provide the ordering of chromosomes to expect while reading the tsv.
 #' @return Iterable matrix object with dimension ranges x cells. When saved,
 #'   the column names of the output matrix will be in the format chr1:500-1000,
@@ -1616,6 +2104,34 @@ setMethod("short_description", "PeakMatrix", function(x) {
   )
 })
 
+setMethod("[", "PeakMatrix", function(x, i, j, ...) {
+    if (missing(x)) stop("x is missing in matrix selection")
+  # Handle transpose via recursive call
+  if (x@transpose) {
+    return(t(t(x)[rlang::maybe_missing(j), rlang::maybe_missing(i)]))
+  }
+
+  i <- selection_index(i, nrow(x), rownames(x))
+  j <- split_selection_index(j, ncol(x), colnames(x))
+
+
+  x <- selection_fix_dims(x, rlang::maybe_missing(i), rlang::maybe_missing(j$subset))
+
+  if (!rlang::is_missing(i)) {
+    x@fragments <- select_cells(x@fragments, i)
+  }
+  if (!rlang::is_missing(j$subset)) {
+    x@chr_id <- x@chr_id[j$subset]
+    x@start <- x@start[j$subset]
+    x@end <- x@end[j$subset]
+  }
+  if (!rlang::is_missing(j$reorder)) {
+    x <- callNextMethod(x,,j$reorder)
+  }
+
+  x
+})
+
 
 # Overlap matrix from fragments
 setClass("TileMatrix",
@@ -1643,15 +2159,16 @@ setMethod("matrix_inputs", "TileMatrix", function(x) list())
 
 #' Calculate ranges x cells tile overlap matrix
 #' @param fragments Input fragments object
-#' @param ranges GRanges object with the ranges to overlap including a metadata column tile_width,
-#'  or a list/data frame with columns chr, start, end, and tile_width. Must be non-overlapping and sorted by
+#' @param ranges `r document_granges("Tiled regions", extras=c("tile_width"="Size of each tile in this region in basepairs"))`  
+#'  
+#'  Must be non-overlapping and sorted by
 #'  (chr, start), with chromosomes ordered according to the chromosome names of `fragments`
 #' @inheritParams convert_to_fragments
 #' @param explicit_tile_names Boolean for whether to add rownames to the output matrix in format e.g
 #'  chr1:500-1000, where start and end coords are given in a 0-based coordinate system. For
 #'  whole-genome Tile matrices the names will take ~5 seconds to generate and take up 400MB of memory.
 #'  Note that either way, tile names will be written when the matrix is saved.
-#' @note When calculating the matrix directly from a fragments tsv, it's necessary to first call `select_chromosomes` in order to
+#' @note When calculating the matrix directly from a fragments tsv, it's necessary to first call `select_chromosomes()` in order to
 #'     provide the ordering of chromosomes to expect while reading the tsv.
 #' @return Iterable matrix object with dimension ranges x cells. When saved,
 #'   the column names will be in the format chr1:500-1000,
@@ -1702,10 +2219,11 @@ tile_matrix <- function(fragments, ranges, zero_based_coords = !is(ranges, "GRan
 }
 
 #' Get ranges corresponding to selected tiles of a tile matrix
+#' @keywords internal
 tile_ranges <- function(tile_matrix, selection) {
   # Handle manually transposed tile_matrix objects
   if (!tile_matrix@transpose) {
-    tile_matrix <- tile_matrix@transpose
+    tile_matrix <- t(tile_matrix)
   }
   indices <- seq_len(nrow(tile_matrix))
   selection <- vctrs::vec_slice(indices, selection) - 1
@@ -1737,6 +2255,46 @@ setMethod("short_description", "TileMatrix", function(x) {
   )
 })
 
+setMethod("[", "TileMatrix", function(x, i, j, ...) {
+  if (missing(x)) stop("x is missing in matrix selection")
+
+  # Handle transpose via recursive call
+  if (x@transpose) {
+    return(t(t(x)[rlang::maybe_missing(j), rlang::maybe_missing(i)]))
+  }
+  
+  i <- selection_index(i, nrow(x), rownames(x))
+  j <- split_selection_index(j, ncol(x), colnames(x))
+
+  x_orig <- x
+  x <- selection_fix_dims(x, rlang::maybe_missing(i), rlang::maybe_missing(j$subset))
+
+  if (!rlang::is_missing(i)) {
+    x@fragments <- select_cells(x@fragments, i)
+  }
+  if (!rlang::is_missing(j$subset)) {
+    if (mean(diff(j$subset) == 1) > .9) {
+      # If 90% contiguous, then use a slice
+      new_tiles <- subset_tiles_cpp(
+        x@chr_id, x@start, x@end, x@tile_width, x@chr_levels,
+        j$subset - 1
+      )
+      x@chr_id <- new_tiles$chr_id
+      x@start <- new_tiles$start
+      x@end <- new_tiles$end
+      x@tile_width <- new_tiles$tile_width
+    } else {
+      # Otherwise, convert to a peak matrix
+      peaks <- tile_ranges(x_orig, j$subset)
+      x <- t(peak_matrix(x@fragments, peaks))
+    }
+  }
+  if (!rlang::is_missing(j$reorder)) {
+    x <- callNextMethod(x,,j$reorder)
+  }
+  x
+})
+
 # Convert matrix types
 setClass("ConvertMatrixType",
   contains = "IterableMatrix",
@@ -1761,6 +2319,7 @@ setMethod("short_description", "ConvertMatrixType", function(x) {
     sprintf("Convert type from %s to %s", matrix_type(x@matrix), matrix_type(x))
   )
 })
+
 setMethod("[", "ConvertMatrixType", function(x, i, j, ...) {
   if (missing(x)) stop("x is missing in matrix selection")
 
@@ -1788,7 +2347,10 @@ convert_matrix_type <- function(matrix, type = c("uint32_t", "double", "float"))
     return(matrix)
   } else if (is(matrix, "ConvertMatrixType")) {
     if (matrix_type(matrix@matrix) == type) {
-      return(matrix@matrix)
+      ret <- matrix@matrix
+      # Restore dimnames that would have been cleared with wrapMatrix
+      dimnames(ret) <- dimnames(matrix) 
+      return(ret)
     } else {
       matrix@type <- type
       return(matrix)
@@ -1800,6 +2362,23 @@ convert_matrix_type <- function(matrix, type = c("uint32_t", "double", "float"))
 }
 
 # Conversions with dgCMatrix
+
+#' Convert between BPCells matrix and R objects.
+#'
+#' BPCells matrices can be interconverted with Matrix package 
+#' dgCMatrix sparse matrices, as well as base R
+#' dense matrices (though this may result in high memory usage for large matrices)
+#'
+#' @usage
+#' # Convert to R from BPCells
+#' as(bpcells_mat, "dgCMatrix") # Sparse matrix conversion
+#' as.matrix(bpcells_mat) # Dense matrix conversion
+#' 
+#' # Convert to BPCells from R
+#' as(dgc_mat, "IterableMatrix")
+#' @name matrix_R_conversion
+NULL
+
 setClass("Iterable_dgCMatrix_wrapper",
   contains = "IterableMatrix",
   slots = c(
@@ -1843,8 +2422,26 @@ setAs("IterableMatrix", "matrix", function(from) {
   rlang::inform(c(
       "Warning: Converting to a dense matrix may use excessive memory"
     ), .frequency = "regularly", .frequency_id = "matrix_dense_conversion")
-  as(from, "dgCMatrix") %>% as.matrix()  
+  # `mat` will always be numeric mode
+  mat <- as.matrix(as(from, "dgCMatrix"))
+  # to keep the original mode, we transform it when necessary
+  if (matrix_type(from) == "uint32_t") {
+      mat <- matrix_to_integer(mat)
+  }
+  mat
 })
+
+matrix_to_integer <- function(matrix) { # a numeric matrix
+    if (is.integer(matrix)) return(matrix) # styler: off
+    if (all(matrix <= .Machine$integer.max)) {
+        storage.mode(matrix) <- "integer"
+    } else {
+      warning(
+        "Using `double` mode since some values exceed `.Machine$integer.max`"
+      )
+    }
+    matrix
+}
 
 #' @exportS3Method base::as.matrix
 as.matrix.IterableMatrix <- function(x, ...) as(x, "matrix")
@@ -1856,17 +2453,25 @@ setMethod("as.matrix", signature(x = "IterableMatrix"), function(x, ...) as(x, "
 #' @param matrix Input matrix object
 #' @param row_stats Which row statistics to compute
 #' @param col_stats Which col statistics to compute
+#' @param threads Number of threads to use during execution
 #' @return List of row_stats: matrix of n_stats x n_rows,
 #'          col_stats: matrix of n_stats x n_cols
 #' @details The statistics will be calculated in a single pass over the matrix,
 #' so this method is desirable to use for efficiency purposes compared to
 #' the more standard rowMeans or colMeans if multiple statistics are needed.
-#' If variance is calculated, then mean and nonzero count will be included in the
-#' output, and if mean is calculated then nonzero count will be included in the output.
+#' The stats are ordered by complexity: nonzero, mean, then variance. All
+#' less complex stats are calculated in the process of calculating a more complicated stat.
+#' So to calculate mean and variance simultaneously, just ask for variance,
+#' which will compute mean and nonzero counts as a side-effect
 #' @export
 matrix_stats <- function(matrix,
                          row_stats = c("none", "nonzero", "mean", "variance"),
-                         col_stats = c("none", "nonzero", "mean", "variance")) {
+                         col_stats = c("none", "nonzero", "mean", "variance"),
+                         threads = 0L
+                         ) {
+  assert_is(matrix, "IterableMatrix")
+  assert_is_wholenumber(threads)
+
   stat_options <- c("none", "nonzero", "mean", "variance")
   row_stats <- match.arg(row_stats)
   col_stats <- match.arg(col_stats)
@@ -1880,7 +2485,14 @@ matrix_stats <- function(matrix,
   row_stats_number <- match(row_stats, stat_options) - 1
   col_stats_number <- match(col_stats, stat_options) - 1
 
-  it <- iterate_matrix(matrix)
+  matrix <- convert_matrix_type(matrix, "double")
+  if (threads == 0L) {
+    it <- iterate_matrix(matrix)
+  } else {
+    it <- iterate_matrix(
+      parallel_split(matrix, threads, threads*4)
+    )
+  }
   res <- matrix_stats_cpp(it, row_stats_number, col_stats_number)
   rownames(res$row_stats) <- stat_options[seq_len(row_stats_number) + 1]
   rownames(res$col_stats) <- stat_options[seq_len(col_stats_number) + 1]
@@ -1895,3 +2507,109 @@ matrix_stats <- function(matrix,
 
   return(res)
 }
+
+#' Calculate svds
+#'
+#' Use the C++ Spectra solver (same as RSpectra package), in order to
+#' compute the largest k values and corresponding singular vectors.
+#' Empirically, memory usage is much lower than using irlba::irlba, likely
+#' due to avoiding R garbage creation while solving due to the pure-C++ solver.
+#'
+#' @param A The matrix whose truncated SVD is to be computed.
+#' @param k Number of singular values requested.
+#' @param nu Number of left singular vectors to be computed. This must be between 0 and 'k'. (Must be equal to 'k' for BPCells IterableMatrix) 
+#' @param nu Number of right singular vectors to be computed. This must be between 0 and 'k'. (Must be equal to 'k' for BPCells IterableMatrix) 
+#' @param opts Control parameters related to computing algorithm. See *Details* below
+#' @param threads Control threads to use calculating mat-vec producs (BPCells specific)
+#' @return A list with the following components:
+##' \item{d}{A vector of the computed singular values.}
+##' \item{u}{An \code{m} by \code{nu} matrix whose columns contain
+##'          the left singular vectors. If \code{nu == 0}, \code{NULL}
+##'          will be returned.}
+##' \item{v}{An \code{n} by \code{nv} matrix whose columns contain
+##'          the right singular vectors. If \code{nv == 0}, \code{NULL}
+##'          will be returned.}
+##' \item{nconv}{Number of converged singular values.}
+##' \item{niter}{Number of iterations used.}
+##' \item{nops}{Number of matrix-vector multiplications used.}
+#' @details
+#' When RSpectra is installed, this function will just add a method to
+#' `RSpectra::svds()` for the `IterableMatrix` class. This
+#' documentation is a slightly-edited version of the `RSpectra::svds()` 
+#' documentation.
+#' 
+#' The \code{opts} argument is a list that can supply any of the
+#' following parameters:
+#'
+#' \describe{
+#' \item{\code{ncv}}{Number of Lanzcos basis vectors to use. More vectors
+#'                   will result in faster convergence, but with greater
+#'                   memory use. \code{ncv} must be satisfy
+#'                   \eqn{k < ncv \le p}{k < ncv <= p} where
+#'                   \code{p = min(m, n)}.
+#'                   Default is \code{min(p, max(2*k+1, 20))}.}
+#' \item{\code{tol}}{Precision parameter. Default is 1e-10.}
+#' \item{\code{maxitr}}{Maximum number of iterations. Default is 1000.}
+#' \item{\code{center}}{Either a logical value (\code{TRUE}/\code{FALSE}), or a numeric
+#'                      vector of length \eqn{n}. If a vector \eqn{c} is supplied, then
+#'                      SVD is computed on the matrix \eqn{A - 1c'}{A - 1 * c'},
+#'                      in an implicit way without actually forming this matrix.
+#'                      \code{center = TRUE} has the same effect as
+#'                      \code{center = colMeans(A)}. Default is \code{FALSE}. Ignored in BPCells}
+#' \item{\code{scale}}{Either a logical value (\code{TRUE}/\code{FALSE}), or a numeric
+#'                     vector of length \eqn{n}. If a vector \eqn{s} is supplied, then
+#'                     SVD is computed on the matrix \eqn{(A - 1c')S}{(A - 1 * c')S},
+#'                     where \eqn{c} is the centering vector and \eqn{S = diag(1/s)}.
+#'                     If \code{scale = TRUE}, then the vector \eqn{s} is computed as
+#'                     the column norm of \eqn{A - 1c'}{A - 1 * c'}.
+#'                     Default is \code{FALSE}. Ignored in BPCells}
+#' }
+#' @references Qiu Y, Mei J (2022). _RSpectra: Solvers for Large-Scale Eigenvalue and SVD Problems_. R package version 0.16-1, <https://CRAN.R-project.org/package=RSpectra>.
+#' @usage svds(A, k, nu = k, nv = k, opts = list(), threads=0L, ...)
+#' @name svds
+NULL
+
+# Use this trickery to re-use the svds generic from RSpectra if available
+if (requireNamespace("RSpectra", quietly = TRUE)) {
+  svds <- RSpectra::svds
+} else {
+  svds <- function (A, k, nu = k, nv = k, opts = list(), ...) UseMethod("svds")
+}
+
+#' @export
+setMethod("svds", signature(A="IterableMatrix"), function (A, k, nu = k, nv = k, opts = list(), threads=0) {
+  assert_is_wholenumber(threads)
+  assert_is_wholenumber(k)
+  assert_true(k == nu)
+  assert_true(k == nv)
+  assert_true(k < min(nrow(A), ncol(A)))
+  if (min(nrow(A), ncol(A)) < 3) stop("Must have at least 3 rows and cols")
+
+  assert_true(!("center" %in% names(opts)))
+  assert_true(!("scale" %in% names(opts)))
+
+  solver_params <- list(
+    ncv = min(min(nrow(A), ncol(A)), max(2*k+1, 20)),
+    tol = 1e-5,
+    maxitr = 1000
+  )
+  solver_params[names(opts)] <- opts
+
+  A <- convert_matrix_type(A, "double")
+  if (threads == 0L) {
+    it <- iterate_matrix(A)
+  } else {
+    it <- iterate_matrix(
+      parallel_split(A, threads, threads*4)
+    )
+  }
+  
+  svds_cpp(
+    it, 
+    k, 
+    solver_params[["ncv"]],
+    solver_params[["maxitr"]],
+    solver_params[["tol"]],
+    A@transpose
+  )
+})

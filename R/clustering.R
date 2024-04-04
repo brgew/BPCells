@@ -1,13 +1,4 @@
 
-# Prune zeros from a dgCMatrix
-prune_zeros_dgCMatrix <- function(mat) {
-  nonzeros <- colSums(mat != 0)
-  mat@i <- mat@i[mat@x != 0]
-  mat@x <- mat@x[mat@x != 0]
-  mat@p <- as.integer(c(0, cumsum(nonzeros)))
-  mat
-}
-
 #' K Nearest Neighbor (KNN) Graph
 #'
 #' Convert a KNN object (e.g. returned by `knn_hnsw()` or `knn_annoy()`) into
@@ -36,7 +27,7 @@ knn_to_graph <- function(knn, use_weights = FALSE, self_loops = TRUE) {
   )
   if (!self_loops) {
     diag(mat) <- 0
-    mat <- prune_zeros_dgCMatrix(mat)
+    mat <- Matrix::drop0(mat)
   }
   rownames(mat) <- rownames(knn$idx)
   colnames(mat) <- rownames(knn$idx)
@@ -50,28 +41,91 @@ knn_to_graph <- function(knn, use_weights = FALSE, self_loops = TRUE) {
 #'  This follows the algorithm that Seurat uses to compute SNN graphs
 #' @param min_val minimum jaccard index between neighbors. Values below this will
 #'  round to 0
+#' @param self_loops Whether to allow self-loops in the output graph
+#' @param return_type Whether to return a sparse adjacency matrix or an edge list
 #' @return **knn_to_snn_graph**
-#'   Sparse matrix (dgCMatrix) where `mat[i,j]` = jaccard index of the overlap
-#'   in nearest neigbors between cell `i` and cell `j`, or 0 if the jaccard index
-#'   is < `min_val`
+#' - `return_type == "matrix"`:
+#'      Sparse matrix (dgCMatrix) where `mat[i,j]` = jaccard index of the overlap
+#'      in nearest neigbors between cell `i` and cell `j`, or 0 if the jaccard index
+#'      is < `min_val`. Only the lower triangle is filled in, which is compatible with
+#'      the BPCells clustering methods
+#' - `return_type == "list"`:
+#'      List of 3 equal-length vectors `i`, `j`, and `weight`, along with an integer `dim`. 
+#'      These correspond to the rows, cols, and values of non-zero entries in the lower triangle
+#'      adjacency matrix. `dim` is the total number of vertices (cells) in the graph 
 #' @export
-knn_to_snn_graph <- function(knn, min_val = 1 / 15, self_loops = TRUE) {
-  mat <- knn_to_graph(knn, use_weights = FALSE)
-  mat <- mat %*% t(mat)
-  mat <- mat / (2 * ncol(knn$idx) - mat)
-  mat@x[mat@x < min_val] <- 0
+knn_to_snn_graph <- function(knn, min_val = 1 / 15, self_loops = FALSE, return_type=c("matrix", "list")) {
+  return_type <- match.arg(return_type)
+  # Solve x / (2*K - x) >= min_val --> x >= 2*K*min_val / (1 + min_val)
+  min_int <- ceiling(2*min_val*ncol(knn$idx) / (1 + min_val))
+  snn <- build_snn_graph_cpp(knn$idx, min_neighbors = min_int)
+
+  snn$snn_count <- snn$snn_count / (2*ncol(knn$idx) - snn$snn_count)
+  
   if (!self_loops) {
-    diag(mat) <- 0
+    keepers <- snn$i != snn$j
+    snn$i <- snn$i[keepers]
+    snn$j <- snn$j[keepers]
+    snn$snn_count <- snn$snn_count[keepers]
   }
-  # Prune the explicit 0 entries from storage
-  mat <- prune_zeros_dgCMatrix(mat)
-  mat
+
+  names(snn)[names(snn) == "snn_count"] <- "weight"
+  snn$dim <- nrow(knn$idx)
+  if (return_type == "list") {
+    return(snn)
+  }
+  
+  # Return as a sparse matrix
+  Matrix::sparseMatrix(
+    i = snn$i + 1L, j = snn$j + 1L, x = snn$weight,
+    dims = c(snn$dim, snn$dim),
+    repr="C"
+  )
+}
+
+#' @rdname knn_graph
+#' @details **knn_to_geodesic_graph**
+#'  Convert a knn object into an undirected weighted graph, using the same 
+#'  geodesic distance estimation method as the UMAP package. 
+#'  This matches the output of `umap._umap.fuzzy_simplicial_set`
+#'  from the `umap-learn` python package, used by default in `scanpy.pp.neighbors`.
+#'  Because this only re-weights and symmetrizes the KNN graph, it will usually use
+#'  less memory and return a sparser graph than `knn_to_snn_graph` which computes
+#'  2nd-order neighbors. Note: when cells don't have themselves listed as the nearest
+#'  neighbor, results may differ slightly from `umap._umap.fuzzy_simplicial_set`, which
+#'  assumes self is always successfully found in the approximate nearest neighbor search.
+#'  
+#' @param threads Number of threads to use during calculations
+#' @return **knn_to_geodesic_graph**
+#' - `return_type == "matrix"`:
+#'      Sparse matrix (dgCMatrix) where `mat[i,j]` = normalized similarity between cell `i` and cell `j`.
+#'      Only the lower triangle is filled in, which is compatible with the BPCells clustering methods
+#' - `return_type == "list"`:
+#'      List of 3 equal-length vectors `i`, `j`, and `weight`, along with an integer `dim`. 
+#'      These correspond to the rows, cols, and values of non-zero entries in the lower triangle
+#'      adjacency matrix. `dim` is the total number of vertices (cells) in the graph 
+#' @export
+knn_to_geodesic_graph <- function(knn, return_type=c("matrix", "list"), threads=0L) {
+  return_type <- match.arg(return_type)
+  graph <- build_umap_graph_cpp(knn$dist, knn$idx)
+  
+  graph$dim <- nrow(knn$idx)
+  if (return_type == "list") {
+    return(graph)
+  }
+  
+  # Return as a sparse matrix
+  Matrix::sparseMatrix(
+    i = graph$i + 1L, j = graph$j + 1L, x = graph$weight,
+    dims = c(graph$dim, graph$dim),
+    repr="C"
+  )
 }
 
 #' Cluster an adjacency matrix
 #' @rdname cluster
 #' @details **cluster_graph_leiden**: Leiden graph clustering algorithm `igraph::cluster_leiden()`
-#' @param snn Symmetric adjacency matrix (dgCMatrix) output from e.g. knn_to_snn_graph
+#' @param snn Symmetric adjacency matrix (dgCMatrix) output from e.g. knn_to_snn_graph. Only the lower triangle is used
 #' @param resolution Resolution parameter. Higher values result in more clusters
 #' @param seed Random seed for clustering initialization
 #' @param ... Additional arguments to underlying clustering function

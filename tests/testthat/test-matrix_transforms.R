@@ -3,6 +3,37 @@ generate_sparse_matrix <- function(nrow, ncol, fraction_nonzero = 0.5, max_val =
   as(m, "dgCMatrix")
 }
 
+test_that("Subsetting transform works", {
+    set.seed(125124)
+    m1 <- generate_sparse_matrix(20, 10, max_val=1e5)
+    m2 <- as(m1, "IterableMatrix")
+    m1 <- as.matrix(m1)
+
+    # Apply some transformation layers
+    y <- runif(nrow(m1))
+    m1 <- multiply_rows(m1, y)
+    m2 <- multiply_rows(m2, y)
+
+    y <- runif(ncol(m1))
+    m1 <- multiply_cols(m1, y)
+    m2 <- multiply_cols(m2, y)
+
+    m1 <- log1p(m1) + 1
+    m2 <- log1p_slow(m2) + 1
+
+    expect_equal(as.matrix(m2), m1)
+    
+    i <- sample.int(nrow(m1))
+    j <- sample.int(ncol(m2))
+    x <- 8
+    expect_equal(as.matrix(m2[,c(7,8)]), m1[,c(7,8),drop=FALSE])
+
+
+    expect_equal(as.matrix(m2[i,j]), m1[i,j])
+    expect_equal(as.matrix(m2[i[1:5],j[1:6]]), m1[i[1:5],j[1:6]])
+    expect_equal(as.matrix(m2[sort(i[1:5]),sort(j[1:6])]), m1[sort(i[1:5]),sort(j[1:6])])
+})
+
 test_that("log1p works", {
     m <- generate_sparse_matrix(20, 10, max_val=1e5)
     res <- m %>%
@@ -78,24 +109,92 @@ test_that("binarize works", {
     m2 <- as(as(m, 'dgCMatrix'), 'IterableMatrix')
 
     m3 <- as(binarize(m2), 'matrix')
-    ans3 <- matrix(c(0, 1, 0, 1, 1, 1, 1, 1), nrow=2)
+    ans3 <- matrix(as.integer(c(0, 1, 0, 1, 1, 1, 1, 1)), nrow=2)
     expect_identical(m3, ans3)
     expect_identical(as(m2 > 0L, 'matrix'), ans3)
     expect_identical(as(0L < m2, 'matrix'), ans3)
 
     m4 <- as(binarize(m2, threshold=.5), 'matrix')
-    ans4 <- matrix(c(0, 0, 0, 1, 0, 1, 0, 1), nrow=2)
+    ans4 <- matrix(as.integer(c(0, 0, 0, 1, 0, 1, 0, 1)), nrow=2)
     expect_identical(m4, ans4)
     expect_identical(as(m2 > 0.5, 'matrix'), ans4)
     expect_identical(as(0.5 < m2, 'matrix'), ans4)
 
     m5 <- as(binarize(m2, threshold=.5, strict_inequality=FALSE), 'matrix')
-    ans5 <- matrix(c(0, 1, 0, 1, 0, 1, 0, 1), nrow=2)
+    ans5 <- matrix(as.integer(c(0, 1, 0, 1, 0, 1, 0, 1)), nrow=2)
     expect_identical(m5, ans5)
     expect_identical(as(m2 >= 0.5, 'matrix'), ans5)
     expect_identical(as(0.5 <= m2, 'matrix'), ans5)
 
     short_description(m2 > 0.5)
+})
+
+test_that("Issue 43 regression (preserve colnames when cancelling type conversion)",  {
+    m <- matrix(1:12, nrow=3) |> as("dgCMatrix")
+    rownames(m) <- paste0("row", seq_len(nrow(m)))
+    colnames(m) <- paste0("col", seq_len(ncol(m)))
+
+    m2 <- t(m) |> as("IterableMatrix")
+    rownames(m2) <- paste0("row", seq_len(nrow(m2)))
+    colnames(m2) <- paste0("col", seq_len(ncol(m2)))
+
+    res <- m %*% (m2 >= 1)
+    expect_identical(rownames(res), rownames(m))
+    expect_identical(colnames(res), colnames(m2))
+})
+
+test_that("Multiply cols of transposed TransformScaleShift works", {
+    m <- matrix(1:12, nrow=3) |> as("dgCMatrix") |> as("IterableMatrix") |> t()
+
+    res <- (m - seq_len(nrow(m)))/seq_len(nrow(m))
+    res <- multiply_cols(res, seq_len(ncol(m)))
+
+    ans <- (t(matrix(1:12, nrow=3)) - seq_len(nrow(m)))/seq_len(nrow(m))
+    ans <- multiply_cols(ans, seq_len(ncol(m)))
+    expect_equal(as.matrix(res), as.matrix(ans))
+})
+
+test_that("Complicated TransformScaleShift works", {
+    # Idea: randomly generate a series of scales + shifts, 
+    # checking that the whole sequence returns correct results
+    # Don't set a seed so if there's a rare bug we have a better chance of
+    # hitting it eventually
+
+    # Run this test 5 times to improve chances of catching something weird.
+    # We can't just extend the random operations indefinitely without running
+    # into precision issues.
+    for (j in seq_len(5)) {
+        m <- matrix(1:12, nrow=3)
+        bp <- as(m, "dgCMatrix") |> as("IterableMatrix")
+        bp_t <- as(t(m), "dgCMatrix") |> as("IterableMatrix") |> t()
+
+        # Do 30 random operations and check at the end
+        for (i in seq_len(30)) {
+            axis <- sample(c("row", "col", "global"), 1)
+            op <- sample(c(`+`, `*`), 1)[[1]]
+            bp_prev <- bp
+            bp_t_prev <- bp_t
+            if (axis == "row") {
+                y <- sample(c(-2, -1, 1, 2), nrow(m))
+                m <- op(m, y)
+                bp <- op(bp, y)
+                bp_t <- op(bp_t, y)
+            } else if (axis == "col") {
+                y <- sample(c(-2, -1, 1, 2), ncol(m))
+                m <- t(op(t(m), y))
+                bp <- t(op(t(bp), y))
+                bp_t <- t(op(t(bp_t), y))
+            } else {
+                y <- sample(c(-2, -1, 1, 2), 1)
+                m <- op(m, y)
+                bp <- op(bp, y)
+                bp_t <- op(bp_t, y)
+            }
+        }
+        expect_identical(m, as.matrix(bp))
+        expect_identical(m, as.matrix(bp_t))
+    }
+    
 })
 
 test_that("round works", {

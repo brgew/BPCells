@@ -2,25 +2,34 @@
 
 namespace BPCells {
 
-FileStringReader::FileStringReader(std::filesystem::path path) : data(readLines(path)) {}
-const char *FileStringReader::get(uint64_t idx) const {
+FileStringReader::FileStringReader(std_fs::path path) : path(path) {}
+
+inline void FileStringReader::ensureDataReady() {
+    if (!data_ready) {
+        data = readLines(path);
+        data_ready = true;
+    }
+}
+const char *FileStringReader::get(uint64_t idx) {
+    ensureDataReady();
     if (idx < data.size()) return data[idx].c_str();
     return NULL;
 }
 
-uint64_t FileStringReader::size() const { return data.size(); }
+uint64_t FileStringReader::size() {
+    ensureDataReady();
+    return data.size();
+}
 
-FileStringWriter::FileStringWriter(std::filesystem::path path) : path(path) {}
-void FileStringWriter::write(const StringReader &reader) {
+FileStringWriter::FileStringWriter(std_fs::path path) : path(path) {}
+void FileStringWriter::write(StringReader &reader) {
     std::ofstream f(path.c_str());
     uint64_t i = 0;
     while (true) {
         const char *s = reader.get(i);
         if (s == NULL) break;
-        while (*s != '\0') {
-            f.put(*s);
-            s++;
-        }
+        
+        f.write(s, strlen(s));
         f.put('\n');
         i += 1;
     }
@@ -30,11 +39,11 @@ FileWriterBuilder::FileWriterBuilder(std::string _dir, uint64_t buffer_size, boo
     : dir(_dir)
     , buffer_size(buffer_size) {
 
-    if (!allow_exists && std::filesystem::exists(dir)) {
+    if (!allow_exists && std_fs::exists(dir)) {
         throw std::runtime_error(std::string("Path already exists: ") + _dir);
     }
 
-    std::filesystem::create_directories(dir);
+    std_fs::create_directories(dir);
 }
 
 UIntWriter FileWriterBuilder::createUIntWriter(std::string name) {
@@ -69,14 +78,14 @@ void FileWriterBuilder::writeVersion(std::string version) {
     f << version << std::endl;
 }
 
-void FileWriterBuilder::deleteWriter(std::string name) { std::filesystem::remove(dir / name); }
+void FileWriterBuilder::deleteWriter(std::string name) { std_fs::remove(dir / name); }
 
 FileReaderBuilder::FileReaderBuilder(std::string _dir, uint64_t buffer_size, uint64_t read_size)
     : dir(_dir)
     , buffer_size(buffer_size)
     , read_size(read_size) {
 
-    if (!std::filesystem::exists(dir)) {
+    if (!std_fs::exists(dir)) {
         throw std::invalid_argument(std::string("Missing directory: ") + _dir);
     }
 }
@@ -124,13 +133,17 @@ std::string FileReaderBuilder::readVersion() {
     return version[0];
 }
 
-std::vector<std::string> readLines(std::filesystem::path path) {
+std::vector<std::string> readLines(std_fs::path path) {
     std::ifstream in;
     std::string line;
     std::vector<std::string> ret;
 
     in.open(path.c_str());
-    if (!in) throw std::runtime_error(std::string("Could not open file: ") + path.string());
+    if (!in) {
+        throw std::runtime_error(
+            std::string("Could not open file: ") + strerror(errno) + ": " + path.string()
+        );
+    }
 
     while (std::getline(in, line)) {
         ret.push_back(line);

@@ -1,4 +1,3 @@
-#include <filesystem>
 #include <random>
 #include <sstream>
 
@@ -17,7 +16,6 @@
 
 #include <Eigen/Core>
 
-namespace fs = std::filesystem;
 using namespace BPCells;
 using namespace ::testing;
 using namespace Eigen;
@@ -258,14 +256,14 @@ TEST(MatrixIO, ConcatRows) {
     std::vector<std::unique_ptr<MatrixLoader<double>>> error_mat_vec;
     error_mat_vec.push_back(std::make_unique<CSparseMatrix>(get_map(m1)));
     error_mat_vec.push_back(std::make_unique<CSparseMatrix>(get_map(mx)));
-    EXPECT_ANY_THROW(ConcatRows<double>(std::move(error_mat_vec)));
+    EXPECT_ANY_THROW(ConcatRows<double>(std::move(error_mat_vec), 0));
 
     CSparseMatrixWriter res;
     std::vector<std::unique_ptr<MatrixLoader<double>>> mat_vec;
     mat_vec.push_back(std::make_unique<CSparseMatrix>(get_map(m1)));
     mat_vec.push_back(std::make_unique<CSparseMatrix>(get_map(m2)));
     mat_vec.push_back(std::make_unique<CSparseMatrix>(get_map(m3)));
-    ConcatRows<double> my_concat(std::move(mat_vec));
+    ConcatRows<double> my_concat(std::move(mat_vec), 0);
     res.write(my_concat);
 
     EXPECT_TRUE(res.getMat().isApprox(concat));
@@ -285,14 +283,14 @@ TEST(MatrixIO, ConcatCols) {
     std::vector<std::unique_ptr<MatrixLoader<double>>> error_mat_vec;
     error_mat_vec.push_back(std::make_unique<CSparseMatrix>(get_map(m1)));
     error_mat_vec.push_back(std::make_unique<CSparseMatrix>(get_map(mx)));
-    EXPECT_ANY_THROW(ConcatCols<double>(std::move(error_mat_vec)));
+    EXPECT_ANY_THROW(ConcatCols<double>(std::move(error_mat_vec), 0));
 
     CSparseMatrixWriter res;
     std::vector<std::unique_ptr<MatrixLoader<double>>> mat_vec;
     mat_vec.push_back(std::make_unique<CSparseMatrix>(get_map(m1)));
     mat_vec.push_back(std::make_unique<CSparseMatrix>(get_map(m2)));
     mat_vec.push_back(std::make_unique<CSparseMatrix>(get_map(m3)));
-    ConcatCols<double> my_concat(std::move(mat_vec));
+    ConcatCols<double> my_concat(std::move(mat_vec), 0);
 
     res.write(my_concat);
 

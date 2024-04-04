@@ -59,7 +59,8 @@
 
     <div class="section level2">
 <h2 class="pkg-version" data-toc-text="1.0" id="bpcells-10-roadmap">BPCells 1.0 Roadmap<a class="anchor" aria-label="anchor" href="#bpcells-10-roadmap"></a></h2>
-<ul><li>Parallelization</li>
+<ul><li>
+<del>Parallelization</del> (basic support complete. See below)</li>
 <li>Native python library (re-using C++ backend)</li>
 <li>Peak-gene correlations</li>
 <li>MACS peak calling</li>
@@ -68,22 +69,63 @@
     <div class="section level2">
 <h2 class="pkg-version" data-toc-text="0.2.0" id="bpcells-020-github-main-branch---in-progress">BPCells 0.2.0 (github main branch - in progress)<a class="anchor" aria-label="anchor" href="#bpcells-020-github-main-branch---in-progress"></a></h2>
 <div class="section level3">
+<h3 id="breaking-changes-0-2-0">Breaking changes<a class="anchor" aria-label="anchor" href="#breaking-changes-0-2-0"></a></h3>
+<ul><li>New slots have been added to 10x matrix objects, so any saved RDS files may need to have their 10x matrix inputs re-opened and replaced by calling <code><a href="../reference/all_matrix_inputs.html">all_matrix_inputs()</a></code>. Outside of loading old RDS files no changes should be needed.</li>
+</ul></div>
+<div class="section level3">
 <h3 id="features-0-2-0">Features<a class="anchor" aria-label="anchor" href="#features-0-2-0"></a></h3>
-<ul><li>Reading text-based MatrixMarket inputs (e.g. from 10x or Parse) is now supported via <code><a href="../reference/import_matrix_market.html">import_matrix_market()</a></code> and the convenience function <code><a href="../reference/import_matrix_market.html">import_matrix_market_10x()</a></code>. Our implementation uses disk-backed sorting to allow importing large files with low memory usage.</li>
+<ul><li>New <code><a href="../reference/svds.html">svds()</a></code> function, based on the excellent Spectra C++ library (used in RSpectra) by Yixuan Qiu. This should ensure lower memory usage compared to <code>irlba</code>, while achieving similar speed + accuracy.</li>
+<li>Limited parallelization is now supported. This is easiest to use via the <code>threads</code> argument to <code><a href="../reference/matrix_stats.html">matrix_stats()</a></code> and <code><a href="../reference/svds.html">svds()</a></code>.
+<ul><li>All normalizations are supported, but a few operations like <code><a href="../reference/marker_features.html">marker_features()</a></code> and writing a matrix to disk remain single-threaded.</li>
+<li>Running <code><a href="../reference/svds.html">svds()</a></code> with many threads on gene-major matrices can result in high memory usage for now. This problem is not present for cell-major matrices.</li>
+</ul></li>
+<li>Reading text-based MatrixMarket inputs (e.g. from 10x or Parse) is now supported via <code><a href="../reference/import_matrix_market.html">import_matrix_market()</a></code> and the convenience function <code><a href="../reference/import_matrix_market.html">import_matrix_market_10x()</a></code>. Our implementation uses disk-backed sorting to allow importing large files with low memory usage.</li>
 <li>Added <code><a href="../reference/binarize.html">binarize()</a></code> function and associated generics <code>&lt;</code>, <code>&lt;=</code>, <code>&gt;</code>, and <code>&gt;=</code>. This only supports comparison with non-negative numbers currently. (Thanks to contribution from <a href="https://github.com/brgew" class="external-link">@brgew</a>)</li>
+<li>Added <code><a href="https://rdrr.io/r/base/Round.html" class="external-link">round()</a></code> matrix transformation (Thanks to contributions from <a href="https://github.com/brgew" class="external-link">@brgew</a>)</li>
+<li>Add getter/setter function <code><a href="../reference/all_matrix_inputs.html">all_matrix_inputs()</a></code> to help enable relocating the underlying storage for BPCells matrix transform objects.</li>
+<li>All hdf5-writing functions now support a <code>gzip_level</code> parameter, which will enable a shuffle + gzip filter for compression. This is generally much slower than bitpacking compression, but it adds improved storage options for files that must be read by outside programs. Thanks to <a href="https://github.com/ycli1995" class="external-link">@ycli1995</a> for submitting this improvement in pull <a href="https://github.com/bnprks/BPCells/issues/42" class="external-link">#42</a>.</li>
+<li>AnnData export now supported via <code><a href="../reference/open_matrix_anndata_hdf5.html">write_matrix_anndata_hdf5()</a></code> (issue <a href="https://github.com/bnprks/BPCells/issues/49" class="external-link">#49</a>)</li>
+<li>Re-licensed code base to use dual-licensed Apache V2 or MIT instead of GPLv3</li>
+<li>Assigning to a subset is now supported (e.g. <code>m1[i,j] &lt;- m2</code>). Note that this does not modify data on disk. Instead, it uses a series of subsetting and concatenation operations to provide the <em>appearance</em> of overwriting the appropriate entries.</li>
+<li>Added <code><a href="../reference/knn_graph.html">knn_to_geodesic_graph()</a></code>, which matches the Scanpy default construction for graph-based clustering</li>
 </ul></div>
 <div class="section level3">
 <h3 id="improvements-0-2-0">Improvements<a class="anchor" aria-label="anchor" href="#improvements-0-2-0"></a></h3>
 <ul><li>Merging fragments with <code><a href="https://rdrr.io/r/base/c.html" class="external-link">c()</a></code> now handles inputs with mismatched chromosome names.</li>
 <li>Merging fragments is now 2-3.5x faster</li>
+<li>SNN graph construction in <code><a href="../reference/knn_graph.html">knn_to_snn_graph()</a></code> should work more smoothly on large datasets due to C++ implementation</li>
+<li>Reduced memory usage in <code><a href="../reference/marker_features.html">marker_features()</a></code> for samples with millions of cells and a large number of clusters to compare.</li>
+<li>On Windows, increased the maximum number of files that can be simultaneously open. Previously, opening &gt;63 compressed counts matrices simultaneously would hit the limit. Now at least 1,000 simultaneous matrices should be possible.</li>
+<li>Subsetting peak or tile matrices with <code>[</code> now propagates through so we always avoid computing parts of the peak/tile matrix that have been discarded by our subset. Subsetting a tile matrix will automatically convert into a peak matrix when possible for improved efficiency.</li>
+<li>Subsetting RowBindMatrices and ColBindMatrices now propagates through so we avoid touching matrices with no selected indices</li>
+<li>Added logic to help reduce cases where subsetting causes BPCells to fall back to a less efficient matrix-vector multiply algorithm. This affects most math transforms. As part of this, the filtering part of a subset will propagate to earlier transformation steps, while the reordering will not. Thanks to <a href="https://github.com/nimanouri-nm" class="external-link">@nimanouri-nm</a> for raising issue <a href="https://github.com/bnprks/BPCells/issues/65" class="external-link">#65</a> to fix a bug in the initial implementation.</li>
+<li>Additional C++17 filesystem backwards compatibility that should allow slightly older compilers such as GCC 7.5 to build BPCells.</li>
+<li>
+<code><a href="https://rdrr.io/r/base/matrix.html" class="external-link">as.matrix()</a></code> will produce integer matrices when appropriate (Thanks to <a href="https://github.com/Yunuuuu" class="external-link">@Yunuuuu</a> in pull <a href="https://github.com/bnprks/BPCells/issues/77" class="external-link">#77</a>)</li>
+<li>10x HDF5 matrices can now read and write non-integer types when requested (Thanks to <a href="https://github.com/ycli1995" class="external-link">@ycli1995</a> in pull <a href="https://github.com/bnprks/BPCells/issues/75" class="external-link">#75</a>)</li>
+<li>Old-style 10x files from cellranger v2 can now read multi-genome files, which are returned as a list (Thanks to <a href="https://github.com/ycli1995" class="external-link">@ycli1995</a> in pull <a href="https://github.com/bnprks/BPCells/issues/75" class="external-link">#75</a>)</li>
 </ul></div>
 <div class="section level3">
 <h3 id="bug-fixes-0-2-0">Bug-fixes<a class="anchor" aria-label="anchor" href="#bug-fixes-0-2-0"></a></h3>
 <ul><li>Fixed a few fragment transforms where using <code>chrNames(frags) &lt;- val</code> or <code>cellNames(frags) &lt;- val</code> could cause downstream errors.</li>
 <li>Fixed errors in <code><a href="../reference/transpose_storage_order.html">transpose_storage_order()</a></code> for matrices with &gt;4 billion non-zero entries.</li>
+<li>Fixed error in <code><a href="../reference/transpose_storage_order.html">transpose_storage_order()</a></code> for matrices with no non-zero entries.</li>
 <li>Fixed bug writing fragment files with &gt;512 chromosomes.</li>
 <li>Fixed bug when reading fragment files with &gt;4 billion fragments.</li>
 <li>Fixed file permissions errors when using read-only hdf5 files (Issue <a href="https://github.com/bnprks/BPCells/issues/26" class="external-link">#26</a> reported thanks to <a href="https://github.com/ttumkaya" class="external-link">@ttumkaya</a>)</li>
+<li>Renaming <code><a href="https://rdrr.io/r/base/colnames.html" class="external-link">rownames()</a></code> or <code><a href="https://rdrr.io/r/base/colnames.html" class="external-link">colnames()</a></code> is now propagated when saving matrices (Issue <a href="https://github.com/bnprks/BPCells/issues/29" class="external-link">#29</a> reported thanks to <a href="https://github.com/realzehuali" class="external-link">@realzehuali</a>, with an additional fix after report thanks to <a href="https://github.com/Dario-Rocha" class="external-link">@Dario-Rocha</a>)</li>
+<li>Fixed 64-bit integer overflow (!) that could cause incorrect p-value calculations in <code><a href="../reference/marker_features.html">marker_features()</a></code> for features with more than 2.6 million zeros.</li>
+<li>Improved robustness of the Windows installation process for setups that do not need the -lsz linker flag to compile hdf5</li>
+<li>Fixed possible memory safety bug where wrapped R objects (such as dgCMatrix) could be potentially garbage collected while C++ was still trying to access the data in rare circumstances.</li>
+<li>Fixed case when dimnames were not preserved when calling <code><a href="../reference/convert_matrix_type.html">convert_matrix_type()</a></code> twice in a row such that it cancels out (e.g. double -&gt; uint32_t -&gt; double). Thanks to <a href="https://github.com/brgrew" class="external-link">@brgrew</a> reporting issue <a href="https://github.com/bnprks/BPCells/issues/43" class="external-link">#43</a></li>
+<li>Caused and fixed issue resulting in unusably slow performance reading matrices from HDF5 files. Broken versions range from commit 21f8dcf until the fix in 3711a40 (October 18-November 3, 2023). Thanks to <a href="https://github.com/abhiachoudhary" class="external-link">@abhiachoudhary</a> for reporting this in issue <a href="https://github.com/bnprks/BPCells/issues/53" class="external-link">#53</a></li>
+<li>Fixed error with <code><a href="../reference/svds.html">svds()</a></code> not handling row-major matrices correctly. Thanks to <a href="https://github.com/ycli1995" class="external-link">@ycli1995</a> for reporting this in issue <a href="https://github.com/bnprks/BPCells/issues/55" class="external-link">#55</a></li>
+<li>Fixed error with row/col name handling for AnnData matrices. Thanks to <a href="https://github.com/lisch7" class="external-link">@lisch7</a> for reporting this in issue <a href="https://github.com/bnprks/BPCells/issues/57" class="external-link">#57</a></li>
+<li>Fixed error with merging matrices of different data types. Thanks to <a href="https://github.com/Yunuuuu" class="external-link">@Yunuuuu</a> for identifying the issue and providing a fix (<a href="https://github.com/bnprks/BPCells/issues/68" class="external-link">#68</a> and <a href="https://github.com/bnprks/BPCells/issues/70" class="external-link">#70</a>)</li>
+<li>Fixed issue with losing dimnames on subset assignment <code>[&lt;-</code>. Thanks to <a href="https://github.com/Yunuuuu" class="external-link">@Yunuuuu</a> for identifying the issue <a href="https://github.com/bnprks/BPCells/issues/67" class="external-link">#67</a></li>
+<li>Fixed incorrect results with some cases of scaling matrix after shifting. Thanks to <a href="https://github.com/Yunuuuu" class="external-link">@Yunuuuu</a> for identifying the issue <a href="https://github.com/bnprks/BPCells/issues/72" class="external-link">#72</a></li>
+<li>Fixed infinite loop bug when calling <code><a href="../reference/transpose_storage_order.html">transpose_storage_order()</a></code> on a densely-transformed matrix. Thanks to <a href="https://github.com/Yunuuuu" class="external-link">@Yunuuuu</a> for reporting this in issue <a href="https://github.com/bnprks/BPCells/issues/71" class="external-link">#71</a></li>
+<li>h5ad outputs will now subset properly when loaded by the Python anndata package (Thanks to issue described by <a href="https://github.com/ggruenhagen3" class="external-link">@ggruenhagen3</a> in issue <a href="https://github.com/bnprks/BPCells/issues/49" class="external-link">#49</a> and fixed by <a href="https://github.com/ycli1995" class="external-link">@ycli1995</a> in pull <a href="https://github.com/bnprks/BPCells/issues/81" class="external-link">#81</a>)</li>
 </ul></div>
 </div>
     <div class="section level2">
@@ -141,7 +183,7 @@
 </div>
 
 <div class="pkgdown-footer-right">
-  <p></p><p>Site built with <a href="https://pkgdown.r-lib.org/" class="external-link">pkgdown</a> 2.0.7.</p>
+  <p></p><p>Site built with <a href="https://pkgdown.r-lib.org/" class="external-link">pkgdown</a> 2.0.7.9000.</p>
 </div>
 
     </footer></div>

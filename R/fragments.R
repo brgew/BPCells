@@ -146,7 +146,7 @@ setMethod("short_description", "FragmentsTsv", function(x) {
 #'
 #' No disk operations will take place until the fragments are used in a function
 #' @param path File path (e.g. fragments.tsv or fragments.tsv.gz)
-#' @param comment Skip lines at beginning of file which start with comment
+#' @param comment Skip lines at beginning of file which start with comment string
 #' @param end_inclusive Whether the end coordinate of the bed is inclusive -- i.e. there was an
 #'     insertion at the end coordinate rather than the base before the end coordinate. This is the
 #'     10x default, though it's not quite standard for the bed file format.
@@ -427,14 +427,27 @@ setMethod("short_description", "FragmentsHDF5", function(x) {
 #' @param group The group within the hdf5 file to write the data to. If writing
 #' to an existing hdf5 file this group must not already be in use
 #' @param chunk_size For performance tuning only. The chunk size used for the HDF5 array storage.
+#' @param gzip_level Gzip compression level. Default is 0 (no compression). This is recommended when both compression and
+#'     compatibility with outside programs is required. Otherwise, using compress=TRUE is recommended
+#'     as it is >10x faster with often similar compression levels. 
 #' @export
-write_fragments_hdf5 <- function(fragments, path, group = "fragments", compress = TRUE, buffer_size = 8192L, chunk_size = 1024L, overwrite=FALSE) {
+write_fragments_hdf5 <- function(
+    fragments, 
+    path, 
+    group = "fragments", 
+    compress = TRUE, 
+    buffer_size = 8192L, 
+    chunk_size = 1024L, 
+    overwrite = FALSE,
+    gzip_level = 0L
+) {
   assert_is(fragments, "IterableFragments")
   assert_is(path, "character")
   assert_is(group, "character")
   assert_is(compress, "logical")
   assert_is(buffer_size, "integer")
   assert_is(chunk_size, "integer")
+  assert_is(gzip_level, "integer")
   assert_is(overwrite, c("logical", "character"))
   if (is(overwrite, "character")) {
     assert_true(dir.exists(overwrite))
@@ -442,6 +455,12 @@ write_fragments_hdf5 <- function(fragments, path, group = "fragments", compress 
     overwrite <- TRUE
   } else if (overwrite) {
     overwrite_path <- tempfile("overwrite")
+  }
+
+  if (gzip_level != 0L && compress) {
+     rlang::inform(c(
+        "Warning: Mixing gzip compression (gzip_level > 0) with bitpacking compression (compress=TRUE) may be slower than bitpacking compression alone, with little space savings"
+     ))
   }
 
   path <- path.expand(path)
@@ -455,9 +474,9 @@ write_fragments_hdf5 <- function(fragments, path, group = "fragments", compress 
   }
   it <- iterate_fragments(fragments)
   if (compress) {
-    write_packed_fragments_hdf5_cpp(it, path, group, buffer_size, chunk_size, overwrite)
+    write_packed_fragments_hdf5_cpp(it, path, group, buffer_size, chunk_size, overwrite, gzip_level)
   } else {
-    write_unpacked_fragments_hdf5_cpp(it, path, group, buffer_size, chunk_size, overwrite)
+    write_unpacked_fragments_hdf5_cpp(it, path, group, buffer_size, chunk_size, overwrite, gzip_level)
   }
 
   if (did_tmp_copy) {
@@ -481,15 +500,31 @@ open_fragments_hdf5 <- function(path, group = "fragments", buffer_size = 16384L)
 
 
 
-#' Build a Fragments object from an R data frame or GRanges object
-#' @param x An input GRanges, list or data frame. Lists and dataframes
-#'    must have chr, start, end, cell_id. GRanges must have a metadata column
-#'    for cell_id
+#' Convert between BPCells fragments and R objects.
+#'
+#' BPCells fragments can be interconverted with GRanges and data.frame R objects.
+#' The main conversion method is R's builtin `as()` function, though the 
+#' `convert_to_fragments()` helper is also available. For all R objects except 
+#' GRanges, BPCells assumes a 0-based, end-exclusive coordinate system. (See
+#' [genomic-ranges-like] reference for details)
+#'
+#' @usage 
+#' # Convert from R to BPCells
+#' convert_to_fragments(x, zero_based_coords = !is(x, "GRanges"))
+#' as(x, "IterableFragments")
+#' 
+#' # Convert from BPCells to R
+#' as.data.frame(bpcells_fragments)
+#' as(bpcells_fragments, "data.frame")
+#' as(bpcells_fragments, "GRanges")
+#'
+#' @param x `r document_granges("Fragment coordinates", extras=c("cell_id" = "cell barcodes or unique identifiers as string or factor"))`
 #' @param zero_based_coords Whether to convert the ranges from a 1-based end-inclusive
 #'    coordinate system to a 0-based end-exclusive coordinate system. Defaults to true
 #'    for GRanges and false for other formats
-#'    (see <http://genome.ucsc.edu/blog/the-ucsc-genome-browser-coordinate-counting-systems/>)
-#' @return UnpackedMemFragments object representing the given fragments
+#'    (see this [archived UCSC blogpost](https://web.archive.org/web/20210920203703/http://genome.ucsc.edu/blog/the-ucsc-genome-browser-coordinate-counting-systems/))
+#' @return **convert_to_fragments()**: IterableFragments object
+#' @rdname fragment_R_conversion
 #' @export
 convert_to_fragments <- function(x, zero_based_coords = !is(x, "GRanges")) {
   assert_is(zero_based_coords, "logical")
@@ -644,12 +679,12 @@ setMethod("short_description", "SelectLength", function(x) {
     sprintf("Filter to fragment sizes %s bp-%s bp", x@min_len, x@max_len)
   )
 })
-#' Subset fragments to only include those in a given size range
+#' Subset fragments by length
 #' @param fragments Input fragments object
 #' @param min_len Minimum bases in fragment (inclusive)
 #' @param max_len Maximum bases in fragment (inclusive)
 #' @return Fragments object
-#' @details Fragment length is calculated as end-start
+#' @details Fragment length is calculated as `end-start`
 #' @export
 subset_lengths <- function(fragments, min_len = 0L, max_len = NA_integer_) {
   assert_is_wholenumber(min_len)
@@ -712,11 +747,12 @@ setMethod("short_description", "ChrSelectIndex", function(x) {
   )
 })
 
-#' Select chromosmes for subsetting or translating chromosome IDs in a fragments object
+#' Subset, translate, or reorder chromosome IDs
+#' 
 #' @param fragments Input fragments object
 #' @param chromosome_selection List of chromosme IDs (numeric), or names (character).
-#'    The output chromosome ID n will be taken
-#'    from the input fragments chromosome with ID/name chromosome_selection[n].
+#'    The output chromosome ID `n` will be taken
+#'    from the input fragments chromosome with ID/name `chromosome_selection[n]`.
 #' @export
 select_chromosomes <- function(fragments, chromosome_selection) {
   assert_is(fragments, "IterableFragments")
@@ -791,10 +827,10 @@ setMethod("short_description", "CellSelectIndex", function(x) {
     )
   )
 })
-#' Select cells for subsetting or translating cells IDs in a fragments object
+#' Subset, translate, or reorder cell IDs
 #' @param fragments Input fragments object
 #' @param cell_selection List of chromosme IDs (numeric), or names (character).
-#'    The output cell ID `n`` will be taken
+#'    The output cell ID `n` will be taken
 #'    from the input cell with ID/name `cell_selection[n]`.
 #' @export
 select_cells <- function(fragments, cell_selection) {
@@ -853,6 +889,7 @@ setMethod("short_description", "CellMerge", function(x) {
 #' @param fragments Input fragments object
 #' @param cell_groups Character or factor vector providing a group for each cell.
 #' Ordering is the same as `cellNames(fragments)`
+#' @export
 merge_cells <- function(fragments, cell_groups) {
   assert_is(fragments, "IterableFragments")
   assert_not_null(cellNames(fragments))
@@ -933,7 +970,13 @@ setMethod("short_description", "CellPrefix", function(x) {
   )
 })
 
-#' Rename cells by adding a prefix to the names (e.g. sample name)
+#' Add sample prefix to cell names
+#' 
+#' Rename cells by adding a prefix to the names. Most commonly this will be a sample name.
+#' All cells will recieve the exact text of `prefix` added to the beginning, so any separator
+#' characters like "_" must be included in the given `prefix`. Use this prior to merging
+#' fragments from different experiments with `c()` in order to help prevent cell name
+#' clashes.
 #' @param fragments Input fragments object.
 #' @param prefix String to add as the prefix
 #' @return Fragments object with prefixed names
@@ -984,7 +1027,9 @@ setMethod("short_description", "RegionSelect", function(x) {
   )
 })
 
-#' Select fragments overlapping (or not overlapping) selected regions
+#' Subset fragments by genomic region
+#'
+#' Fragments can be subset based on overlapping (or not overlapping) a set of regions
 #' @param fragments Input fragments object.
 #' @param invert_selection If TRUE, select fragments *not* overlapping selected regions
 #'  instead of only fragments overlapping the selected regions.
@@ -1077,6 +1122,7 @@ fragments_identical <- function(fragments1, fragments2) {
 #' Scan through fragments without performing any operations (used for benchmarking)
 #' @param fragments Fragments object to scan
 #' @return Length 4 vector with fragment count, then sums of chr, starts, and ends
+#' @keywords internal
 scan_fragments <- function(fragments) {
   assert_is(fragments, "IterableFragments")
   i <- iterate_fragments(fragments)

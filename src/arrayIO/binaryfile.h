@@ -1,9 +1,11 @@
 #pragma once
 
 #include <cstring>
-#include <filesystem>
 #include <fstream>
 #include <vector>
+
+#include "../utils/filesystem_compat.h"
+
 
 #include "array_interfaces.h"
 
@@ -56,8 +58,23 @@ template <class T> class FileNumReader final : public BulkNumReader<T> {
   public:
     FileNumReader(const char *path) {
         file.open(path, std::ios_base::binary);
+#if _WIN32
+        // Windows-specific: Try to increase maximum open file limit if it is causing
+        // the file open operation to fail
+        if (!file && _getmaxstdio() == 512) {
+            if (_getmaxstdio() == 512) {
+                int new_max = 8192;
+                while (_setmaxstdio(new_max) == -1 && new_max > 512) {
+                    new_max /= 2;
+                }
+                file.open(path, std::ios_base::binary);
+            }
+        }
+#endif
         if (!file) {
-            throw std::runtime_error(std::string("Error opening file: ") + path);
+            throw std::runtime_error(
+                std::string("Error opening file: ") + strerror(errno) + ": " + path
+            );
         }
 
         uint32_t header[2];
@@ -104,30 +121,33 @@ template <class T> class FileNumReader final : public BulkNumReader<T> {
 
 using FileUIntReader = FileNumReader<uint32_t>;
 
-std::vector<std::string> readLines(std::filesystem::path path);
+std::vector<std::string> readLines(std_fs::path path);
 
 class FileStringReader final : public StringReader {
   private:
+    bool data_ready = false;
+    std_fs::path path;
     std::vector<std::string> data;
 
+    inline void ensureDataReady();
   public:
-    FileStringReader(std::filesystem::path path);
-    const char *get(uint64_t idx) const override;
-    uint64_t size() const override;
+    FileStringReader(std_fs::path path);
+    const char *get(uint64_t idx) override;
+    uint64_t size() override;
 };
 
 class FileStringWriter final : public StringWriter {
   private:
-    std::filesystem::path path;
+    std_fs::path path;
 
   public:
-    FileStringWriter(std::filesystem::path path);
-    void write(const StringReader &reader) override;
+    FileStringWriter(std_fs::path path);
+    void write(StringReader &reader) override;
 };
 
 class FileWriterBuilder final : public WriterBuilder {
   protected:
-    std::filesystem::path dir;
+    std_fs::path dir;
     uint64_t buffer_size;
 
   public:
@@ -144,7 +164,7 @@ class FileWriterBuilder final : public WriterBuilder {
 };
 
 class FileReaderBuilder final : public ReaderBuilder {
-    std::filesystem::path dir;
+    std_fs::path dir;
     uint64_t buffer_size;
     uint64_t read_size;
 

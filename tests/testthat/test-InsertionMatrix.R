@@ -1,8 +1,6 @@
-library(dplyr)
-
 tibble_to_fragments <- function(x, chr_names, cell_names) {
   x %>%
-    mutate(
+    dplyr::mutate(
       chr = factor(chr_names[chr], levels = chr_names),
       cell_id = factor(cell_names[cell_id], levels = cell_names)
     ) %>%
@@ -25,7 +23,7 @@ test_that("Basic insertion matrix succeeds", {
   }
   chr1_coords <- dplyr::bind_rows(chr1_list) %>%
     dplyr::arrange(start) %>%
-    mutate(chr = 2, cell_id = cell_id + 1)
+    dplyr::mutate(chr = 2, cell_id = cell_id + 1)
 
   chr2_coords <- tibble::tribble(
     ~cell_id, ~start, ~end,
@@ -35,10 +33,10 @@ test_that("Basic insertion matrix succeeds", {
     3, 10, 20
   ) %>%
     dplyr::arrange(start) %>%
-    mutate(chr = 1, cell_id = cell_id + 1)
+    dplyr::mutate(chr = 1, cell_id = cell_id + 1)
 
   raw_fragments <- tibble_to_fragments(
-    bind_rows(chr2_coords, chr1_coords),
+    dplyr::bind_rows(chr2_coords, chr1_coords),
     chr_names = c("chr2", "chr1"),
     cell_names = sprintf("cell%d", 1:5)
   )
@@ -83,7 +81,7 @@ test_that("Out of range peaks work", {
   }
   chr1_coords <- dplyr::bind_rows(chr1_list) %>%
     dplyr::arrange(start) %>%
-    mutate(chr = 2, cell_id = cell_id + 1)
+    dplyr::mutate(chr = 2, cell_id = cell_id + 1)
 
   chr2_coords <- tibble::tribble(
     ~cell_id, ~start, ~end,
@@ -93,13 +91,13 @@ test_that("Out of range peaks work", {
     3, 10, 20
   ) %>%
     dplyr::arrange(start) %>%
-    mutate(chr = 1, cell_id = cell_id + 1)
+    dplyr::mutate(chr = 1, cell_id = cell_id + 1)
 
-  chr3_coords <- mutate(chr2_coords, chr = 3)
-  chr4_coords <- mutate(chr2_coords, chr = 4)
+  chr3_coords <- dplyr::mutate(chr2_coords, chr = 3)
+  chr4_coords <- dplyr::mutate(chr2_coords, chr = 4)
 
   raw_fragments <- tibble_to_fragments(
-    bind_rows(chr2_coords, chr1_coords, chr3_coords, chr4_coords),
+    dplyr::bind_rows(chr2_coords, chr1_coords, chr3_coords, chr4_coords),
     chr_names = c("chr2", "chr1", "chr3", "chr4"),
     cell_names = sprintf("cell%d", 1:5)
   )
@@ -147,7 +145,7 @@ test_that("Basic tile matrix works", {
   }
   chr1_coords <- dplyr::bind_rows(chr1_list) %>%
     dplyr::arrange(start) %>%
-    mutate(chr = 2, cell_id = cell_id + 1)
+    dplyr::mutate(chr = 2, cell_id = cell_id + 1)
 
   chr2_coords <- tibble::tribble(
     ~cell_id, ~start, ~end,
@@ -157,13 +155,13 @@ test_that("Basic tile matrix works", {
     3, 10, 20
   ) %>%
     dplyr::arrange(start) %>%
-    mutate(chr = 1, cell_id = cell_id + 1)
+    dplyr::mutate(chr = 1, cell_id = cell_id + 1)
 
-  chr3_coords <- mutate(chr2_coords, chr = 3)
-  chr4_coords <- mutate(chr2_coords, chr = 4)
+  chr3_coords <- dplyr::mutate(chr2_coords, chr = 3)
+  chr4_coords <- dplyr::mutate(chr2_coords, chr = 4)
 
   raw_fragments <- tibble_to_fragments(
-    bind_rows(chr2_coords, chr1_coords, chr3_coords, chr4_coords),
+    dplyr::bind_rows(chr2_coords, chr1_coords, chr3_coords, chr4_coords),
     chr_names = c("chr2", "chr1", "chr3", "chr4"),
     cell_names = sprintf("cell%d", 1:5)
   )
@@ -195,4 +193,101 @@ test_that("Basic tile matrix works", {
   attr(my_answer, "dimnames") <- NULL
 
   expect_identical(my_answer, answer)
+})
+
+
+test_that("Subsetting peak matrix works", {
+  f <- open_fragments_10x("../data/mini_fragments.tsv.gz") %>% write_fragments_memory()
+  n_peaks <- 100
+  peak_width <- 1e6
+  max_coord <- 180e6
+  peaks <- tibble::tibble(
+    chr = sample(paste0("chr", 1:5), n_peaks, replace=TRUE),
+    start = as.integer(runif(n_peaks) * max_coord),
+    end = start + max_coord
+  )
+  peaks <- peaks[order_ranges(peaks, chrNames(f)),]
+
+  m <- peak_matrix(f, peaks)
+
+  cols <- sample.int(ncol(m), 1000)
+  rows <- sample.int(nrow(m), 50)
+
+  expect_identical(
+    m[rows, cols] %>% as("dgCMatrix"),
+    as(m, "dgCMatrix")[rows, cols]
+  )
+
+  expect_identical(
+    t(m)[cols, rows] %>% as("dgCMatrix"),
+    t(as(m, "dgCMatrix")[rows, cols])
+  )
+})
+
+# From https://stackoverflow.com/a/3791284
+prime_sieve <- function(n)
+{
+   n <- as.integer(n)
+   if(n > 1e8) stop("n too large")
+   primes <- rep(TRUE, n)
+   primes[1] <- FALSE
+   last.prime <- 2L
+   fsqr <- floor(sqrt(n))
+   while (last.prime <= fsqr)
+   {
+      primes[seq.int(2L*last.prime, n, last.prime)] <- FALSE
+      sel <- which(primes[(last.prime+1):(fsqr+1)])
+      if(any(sel)){
+        last.prime <- last.prime + min(sel)
+      }else last.prime <- fsqr+1
+   }
+   return(primes)
+}
+
+test_that("Subsetting tile matrix works", {
+  f <- open_fragments_10x("../data/mini_fragments.tsv.gz") %>% write_fragments_memory()
+  
+  tile_width <- 1e6
+  max_coord <- 180e6
+  tiles <- tibble::tibble(
+    chr = paste0("chr", 1:5),
+    start = 0,
+    end = max_coord,
+    tile_width = tile_width
+  )
+
+  m <- tile_matrix(f, tiles, explicit_tile_names=TRUE)
+
+  cols <- sample.int(ncol(m), 1000)
+  rows <- sample.int(nrow(m), 50)
+
+  # Test non-contiguous subset
+  expect_identical(
+    m[rows, cols] %>% as("dgCMatrix"),
+    as(m, "dgCMatrix")[rows, cols]
+  )
+  expect_s4_class(m[rows, cols]@matrix, "PeakMatrix")
+
+  expect_identical(
+    t(m)[cols, rows] %>% as("dgCMatrix"),
+    t(as(m, "dgCMatrix")[rows, cols])
+  )
+  expect_s4_class(t(m)[cols, rows]@matrix, "PeakMatrix")
+
+  # Test contiguous subset (remove some prime-numbered tiles)
+  primes <- matrix(which(prime_sieve(nrow(m))), nrow=2)[1,]
+  rows_cont <- seq_len(nrow(m))[-primes]
+  expect_identical(
+    m[rows_cont, cols] %>% as("dgCMatrix"),
+    as(m, "dgCMatrix")[rows_cont, cols]
+  )
+  expect_s4_class(m[rows_cont, cols], "TileMatrix")
+  expect_gt(length(m[rows_cont, cols]@start), length(m@start))
+  expect_lt(length(m[rows_cont, cols]@start), 0.2*length(rows_cont))
+
+  expect_identical(
+    t(m)[cols, rows_cont] %>% as("dgCMatrix"),
+    t(as(m, "dgCMatrix")[rows_cont, cols])
+  )
+  expect_s4_class(t(m)[cols, rows_cont], "TileMatrix")
 })
